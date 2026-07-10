@@ -32,7 +32,7 @@ def main() -> None:
     matches = screen_universe(price_data, rules)
     logger.info("%d ticker(s) matched at least one criterion", len(matches))
 
-    send_digest(matches, date.today())
+    send_digest(matches, date.today(), universe_size=len(tickers), fetched_count=len(price_data))
 
 
 if __name__ == "__main__":
