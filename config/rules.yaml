@@ -1,0 +1,21 @@
+# Screening thresholds — see PLAN.md for the reasoning behind each default.
+
+rsi:
+  period: 14
+  lookback_days: 252 # trading days (~1yr) used to build each ticker's own RSI distribution
+  oversold_percentile: 10 # flag when today's RSI is at/below this percentile of its own history
+  overbought_percentile: 90 # flag when today's RSI is at/above this percentile of its own history
+  fallback_oversold: 30 # static RSI threshold used when a ticker lacks enough history for the percentile calc
+  fallback_overbought: 70
+
+ma_cross:
+  fast: 50
+  slow: 200
+
+volume:
+  spike_multiple: 1.5
+  lookback_days: 20
+
+bollinger:
+  window: 20
+  num_std: 2

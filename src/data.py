@@ -1,0 +1,66 @@
+"""Fetch daily OHLCV history for the ticker universe from Yahoo Finance."""
+
+import logging
+import time
+
+import pandas as pd
+import yfinance as yf
+
+logger = logging.getLogger(__name__)
+
+CHUNK_SIZE = 75
+MAX_RETRIES = 3
+RETRY_BACKOFF_SECONDS = 5
+
+
+def load_universe(path: str = "config/universe.csv") -> list[str]:
+    df = pd.read_csv(path)
+    return df["ticker"].tolist()
+
+
+def _chunk(items: list[str], size: int) -> list[list[str]]:
+    return [items[i : i + size] for i in range(0, len(items), size)]
+
+
+def fetch_history(tickers: list[str], period: str = "2y") -> dict[str, pd.DataFrame]:
+    """Download daily OHLCV history for each ticker, chunked with retries.
+
+    Returns a dict of ticker -> DataFrame (columns: Open, High, Low, Close, Volume).
+    Tickers that fail on every retry are omitted from the result.
+    """
+    result: dict[str, pd.DataFrame] = {}
+
+    for chunk in _chunk(tickers, CHUNK_SIZE):
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                data = yf.download(
+                    chunk,
+                    period=period,
+                    group_by="ticker",
+                    auto_adjust=True,
+                    progress=False,
+                    threads=True,
+                )
+                break
+            except Exception as exc:  # yfinance/urllib can raise a variety of errors
+                logger.warning("Chunk download failed (attempt %d/%d): %s", attempt, MAX_RETRIES, exc)
+                if attempt == MAX_RETRIES:
+                    logger.error("Giving up on chunk starting with %s", chunk[0])
+                    data = None
+                else:
+                    time.sleep(RETRY_BACKOFF_SECONDS * attempt)
+
+        if data is None:
+            continue
+
+        single_ticker = len(chunk) == 1
+        for ticker in chunk:
+            try:
+                df = data if single_ticker else data[ticker]
+            except KeyError:
+                continue
+            df = df.dropna(how="all")
+            if not df.empty:
+                result[ticker] = df
+
+    return result
