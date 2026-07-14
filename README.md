@@ -48,7 +48,7 @@ S&P 500 is scraped live from Wikipedia. NASDAQ-100 comes from a manually maintai
 
 ## GitHub Actions setup
 
-The workflow at `.github/workflows/screen.yml` runs daily at 06:00 UTC (~1am ET), Tue-Sat, covering Mon-Fri market closes. It needs these repo secrets (**Settings → Secrets and variables → Actions → New repository secret**):
+The workflow at `.github/workflows/screen.yml` runs daily at 21:15 UTC (4:15 PM EST, ~5:15 PM during daylight saving), Mon-Fri, shortly after market close. It needs these repo secrets (**Settings → Secrets and variables → Actions → New repository secret**):
 
 | Secret | Value |
 |---|---|

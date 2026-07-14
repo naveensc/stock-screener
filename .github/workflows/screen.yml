@@ -2,7 +2,7 @@ name: Daily Stock Screen
 
 on:
   schedule:
-    - cron: "0 6 * * 2-6" # 06:00 UTC, Tue-Sat (covers Mon-Fri market closes)
+    - cron: "15 21 * * 1-5" # 21:15 UTC = 4:15 PM EST, Mon-Fri (shortly after market close)
   workflow_dispatch: {}
 
 jobs:
