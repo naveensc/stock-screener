@@ -23,13 +23,15 @@ def main() -> None:
     with open("config/rules.yaml") as f:
         rules = yaml.safe_load(f)
 
-    tickers = load_universe()
+    universe = load_universe()
+    tickers = universe["ticker"].tolist()
+    ticker_info = universe.set_index("ticker")[["name", "sector"]].to_dict(orient="index")
     logger.info("Universe: %d tickers", len(tickers))
 
     price_data = fetch_history(tickers)
     logger.info("Fetched price history for %d/%d tickers", len(price_data), len(tickers))
 
-    matches = screen_universe(price_data, rules)
+    matches = screen_universe(price_data, rules, ticker_info)
     logger.info("%d ticker(s) matched at least one criterion", len(matches))
 
     send_digest(matches, date.today(), universe_size=len(tickers), fetched_count=len(price_data))

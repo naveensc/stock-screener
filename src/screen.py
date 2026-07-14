@@ -5,7 +5,7 @@ import pandas as pd
 from indicators import bollinger_signal, ma_cross_signal, rsi_signal, volume_spike_signal
 
 
-def screen_ticker(ticker: str, df: pd.DataFrame, rules: dict) -> dict | None:
+def screen_ticker(ticker: str, df: pd.DataFrame, rules: dict, ticker_info: dict) -> dict | None:
     """Score a single ticker against all criteria. Returns None if nothing matched."""
     close = df["Close"]
     volume = df["Volume"]
@@ -34,8 +34,11 @@ def screen_ticker(ticker: str, df: pd.DataFrame, rules: dict) -> dict | None:
     if not signals:
         return None
 
+    info = ticker_info.get(ticker, {})
     return {
         "ticker": ticker,
+        "name": info.get("name", ticker),
+        "sector": info.get("sector", "Unknown"),
         "price": close.iloc[-1],
         "score": len(signals),
         "signals": signals,
@@ -43,12 +46,15 @@ def screen_ticker(ticker: str, df: pd.DataFrame, rules: dict) -> dict | None:
     }
 
 
-def screen_universe(price_data: dict[str, pd.DataFrame], rules: dict) -> list[dict]:
-    """Screen every ticker, returning matches sorted by score descending."""
+def screen_universe(price_data: dict[str, pd.DataFrame], rules: dict, ticker_info: dict) -> list[dict]:
+    """Screen every ticker, returning matches sorted by score descending.
+
+    ticker_info: {ticker: {"name": ..., "sector": ...}}
+    """
     matches = []
     for ticker, df in price_data.items():
         try:
-            result = screen_ticker(ticker, df, rules)
+            result = screen_ticker(ticker, df, rules, ticker_info)
         except Exception:
             continue
         if result:

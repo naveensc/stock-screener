@@ -82,7 +82,11 @@ def _table_rows(matches: list[dict]) -> str:
         rows += (
             f"<tr style='background:{row_bg}'>"
             f"<td style='padding:10px 12px;border-bottom:1px solid #eee'>"
-            f"<a href='{ticker_link}' style='color:#111;font-weight:700;text-decoration:none;font-size:14px'>{m['ticker']}</a></td>"
+            f"<a href='{ticker_link}' style='color:#111;font-weight:700;text-decoration:none;font-size:14px'>{m['ticker']}</a>"
+            f"<div style='font-size:12px;color:#666;margin-top:2px'>{m['name']}</div>"
+            f"<span style='display:inline-block;margin-top:3px;padding:1px 7px;border-radius:8px;"
+            f"font-size:10px;font-weight:600;color:#555;background:#f0f0f0'>{m['sector']}</span>"
+            "</td>"
             f"<td style='padding:10px 12px;border-bottom:1px solid #eee;color:#333'>${m['price']:.2f}</td>"
             f"<td style='padding:10px 12px;border-bottom:1px solid #eee;color:#333'>{rsi_display}</td>"
             f"<td style='padding:10px 12px;border-bottom:1px solid #eee'>{badges}</td>"
