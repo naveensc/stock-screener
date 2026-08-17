@@ -1,6 +1,6 @@
 # Stock Screener
 
-Daily technical screener over S&P 500 + NASDAQ-100, delivered as an email digest. No UI, no server — runs on a GitHub Actions schedule. See [PLAN.md](PLAN.md) for the full design rationale.
+Daily technical screener over S&P 500 + NASDAQ-100 + Russell 2000, delivered as an email digest. No UI, no server — runs on a GitHub Actions schedule. See [PLAN.md](PLAN.md) for the full design rationale.
 
 ## What it screens for
 
@@ -40,11 +40,11 @@ python src/main.py
 ### Rebuild the ticker universe (occasionally, not part of the daily run)
 
 ```bash
-cd scripts
-python build_universe.py
+# from the repo root
+python scripts/build_universe.py
 ```
 
-S&P 500 is scraped live from Wikipedia. NASDAQ-100 comes from a manually maintained snapshot (`scripts/nasdaq100_snapshot.py`) since no reliable free scrape source was available — re-check it against https://www.nasdaq.com/market-activity/quotes/nasdaq-100-index-components a couple times a year (index reconstitution happens each December).
+S&P 500 is scraped live from Wikipedia. NASDAQ-100 comes from a manually maintained snapshot (`scripts/nasdaq100_snapshot.py`) since no reliable free scrape source was available — re-check it against https://www.nasdaq.com/market-activity/quotes/nasdaq-100-index-components a couple times a year (index reconstitution happens each December). Russell 2000 is sourced live from IWM's (iShares Russell 2000 ETF) public holdings feed, used as a free proxy for the index's constituent list.
 
 ## GitHub Actions setup
 
@@ -65,7 +65,7 @@ stock-screener/
 ├── .github/workflows/screen.yml     # cron trigger
 ├── config/
 │   ├── rules.yaml                   # thresholds
-│   └── universe.csv                 # S&P 500 + NASDAQ-100 ticker list
+│   └── universe.csv                 # S&P 500 + NASDAQ-100 + Russell 2000 ticker list
 ├── scripts/
 │   ├── build_universe.py            # regenerates config/universe.csv
 │   └── nasdaq100_snapshot.py        # manually maintained NASDAQ-100 list

@@ -1,19 +1,29 @@
-"""Rebuild config/universe.csv from S&P 500 + NASDAQ-100 constituents.
+"""Rebuild config/universe.csv from S&P 500 + NASDAQ-100 + Russell 2000 constituents.
 
 S&P 500 is scraped live from Wikipedia (reliable, no auth needed) — its table
 already includes company name and GICS sector for free. NASDAQ-100 comes from
 a manually maintained snapshot (see nasdaq100_snapshot.py) since no free,
 scrape-friendly live source was available at the time this was written.
+Russell 2000 has no free official constituent list either, so it's sourced
+live from IWM (iShares Russell 2000 ETF) — a public, unauthenticated JSON
+endpoint that BlackRock's own fund page calls to render its holdings table.
 
 Run this occasionally to refresh the ticker list as index membership changes:
     python scripts/build_universe.py
 """
 
 import pandas as pd
+import requests
 from nasdaq100_snapshot import NASDAQ_100
 
 SP500_URL = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
+IWM_HOLDINGS_URL = "https://www.ishares.com/varnish-api/blk-one01-product-data/product-data/api/v2/get-product-data"
+IWM_PORTFOLIO_ID = 239710  # iShares Russell 2000 ETF (IWM)
 HEADERS = {"User-Agent": "Mozilla/5.0"}
+
+# iShares' sector labels mostly match GICS but differ from the Wikipedia S&P 500 table in a
+# couple of spots; normalize so sectors are consistent across the merged universe.
+SECTOR_ALIASES = {"Communication": "Communication Services"}
 
 
 def fetch_sp500() -> dict[str, tuple[str, str]]:
@@ -27,12 +37,48 @@ def fetch_sp500() -> dict[str, tuple[str, str]]:
     return result
 
 
+def fetch_russell2000() -> dict[str, tuple[str, str]]:
+    """Returns {ticker: (name, sector)}, sourced from IWM's holdings as a proxy for the Russell
+    2000 index (the ETF tracks it directly; a handful of cash/futures positions are filtered out
+    below via assetClass). Company names come through as ALL CAPS from the feed and are
+    title-cased here — treat casing as approximate.
+    """
+    params = {
+        "appSubType": "ISHARES",
+        "appType": "PRODUCT_PAGE",
+        "component": "holdings.all",
+        "locale": "en_US",
+        "portfolioId": IWM_PORTFOLIO_ID,
+        "targetSite": "us-ishares",
+        "userType": "individual",
+        "excludeContent": "true",
+        "includeConfig": "true",
+    }
+    resp = requests.get(IWM_HOLDINGS_URL, params=params, headers=HEADERS, timeout=30)
+    resp.raise_for_status()
+    points = resp.json()["componentsByNameMap"]["holdings"]["containersByNameMap"]["all"]["dataPointsByNameMap"]
+
+    result = {}
+    for ticker, name, sector, asset_class in zip(
+        points["ticker"]["formattedValue"],
+        points["issueName"]["formattedValue"],
+        points["sectorName"]["formattedValue"],
+        points["assetClass"]["formattedValue"],
+    ):
+        if asset_class != "Equity" or ticker == "-":
+            continue
+        result[ticker] = (name.title(), SECTOR_ALIASES.get(sector, sector))
+    return result
+
+
 def main() -> None:
     sp500 = fetch_sp500()
     nasdaq100 = {ticker: (name, sector) for ticker, name, sector in NASDAQ_100}
+    russell2000 = fetch_russell2000()
 
-    # Merge with S&P 500 taking precedence for overlapping tickers (freshest, scraped live).
-    combined = {**nasdaq100, **sp500}
+    # Merge with S&P 500 taking precedence for overlapping tickers (freshest, scraped live),
+    # then NASDAQ-100, then Russell 2000 (small-cap; no expected overlap with the other two).
+    combined = {**russell2000, **nasdaq100, **sp500}
 
     out_path = "config/universe.csv"
     rows = [{"ticker": ticker, "name": name, "sector": sector} for ticker, (name, sector) in combined.items()]
@@ -40,6 +86,7 @@ def main() -> None:
 
     print(f"S&P 500: {len(sp500)} tickers")
     print(f"NASDAQ-100: {len(nasdaq100)} tickers")
+    print(f"Russell 2000: {len(russell2000)} tickers")
     print(f"Combined unique: {len(combined)} tickers -> {out_path}")
 
 
