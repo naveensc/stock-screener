@@ -19,3 +19,14 @@ volume:
 bollinger:
   window: 20
   num_std: 2
+
+# "Quality at a discount" hard filter — fundamentally-improving companies whose price is
+# depressed by market/sector weakness rather than a company-specific problem.
+quality_value:
+  min_revenue_growth: 0.05 # YoY revenue growth must exceed this (5%)
+  min_eps_growth: 0.0 # YoY EPS growth must be positive
+  require_margin_improved: true # gross (or operating, if gross isn't tagged) margin must have improved YoY
+  min_pct_below_52w_high: 0.15 # price must be at least this far below its 52-week high (15%) ...
+  # ... unless it's below its long MA instead (uses ma_cross.slow above) — either counts as "priced low"
+  trailing_return_window_days: 126 # ~6 months, used for the sector-attribution comparison
+  max_sector_relative_underperformance: 0.05 # decline can't exceed the sector's median decline by more than this (5 percentage points)

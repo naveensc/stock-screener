@@ -119,10 +119,69 @@ def _section(title: str, accent: str, matches: list[dict]) -> str:
     """
 
 
-def build_html(matches: list[dict], run_date: date, universe_size: int | None = None, fetched_count: int | None = None) -> str:
+def _quality_value_rows(matches: list[dict]) -> str:
+    rows = ""
+    for i, m in enumerate(matches):
+        row_bg = "#ffffff" if i % 2 == 0 else "#fafafa"
+        badges = "".join(_signal_badge(s) for s in m["signals"]) or "<span style='color:#999;font-size:12px'>none</span>"
+        ticker_link = f"https://finance.yahoo.com/quote/{m['ticker']}"
+        rows += (
+            f"<tr style='background:{row_bg}'>"
+            f"<td style='padding:10px 12px;border-bottom:1px solid #eee'>"
+            f"<a href='{ticker_link}' style='color:#111;font-weight:700;text-decoration:none;font-size:14px'>{m['ticker']}</a>"
+            f"<div style='font-size:12px;color:#666;margin-top:2px'>{m['name']}</div>"
+            f"<span style='display:inline-block;margin-top:3px;padding:1px 7px;border-radius:8px;"
+            f"font-size:10px;font-weight:600;color:#555;background:#f0f0f0'>{m['sector']}</span>"
+            "</td>"
+            f"<td style='padding:10px 12px;border-bottom:1px solid #eee;color:#333'>${m['price']:.2f}</td>"
+            f"<td style='padding:10px 12px;border-bottom:1px solid #eee;color:#1a7f37'>+{m['revenue_growth'] * 100:.1f}%</td>"
+            f"<td style='padding:10px 12px;border-bottom:1px solid #eee;color:#1a7f37'>+{m['eps_growth'] * 100:.1f}%</td>"
+            f"<td style='padding:10px 12px;border-bottom:1px solid #eee;color:#b42318'>-{m['pct_below_high'] * 100:.1f}%</td>"
+            f"<td style='padding:10px 12px;border-bottom:1px solid #eee'>{badges}</td>"
+            f"<td style='padding:10px 12px;border-bottom:1px solid #eee;text-align:center'>{_score_badge(m['score']) if m['score'] else '-'}</td>"
+            "</tr>"
+        )
+    return rows
+
+
+def _quality_value_section(matches: list[dict]) -> str:
+    if not matches:
+        return ""
+    return f"""
+        <div style="background:#fff;border-radius:8px;overflow:hidden;margin-bottom:16px;border-left:4px solid #b45309">
+          <div style="padding:12px 16px;background:#fafafa;border-bottom:1px solid #eee">
+            <span style="font-size:13px;font-weight:700;text-transform:uppercase;letter-spacing:0.03em;color:#333">Quality at a Discount</span>
+            <span style="font-size:12px;color:#999;margin-left:8px">({len(matches)})</span>
+          </div>
+          <table style="border-collapse:collapse;width:100%">
+            <tr style="background:#f9fafb;text-align:left">
+              <th style="padding:8px 12px;font-size:11px;text-transform:uppercase;letter-spacing:0.03em;color:#6b7280">Ticker</th>
+              <th style="padding:8px 12px;font-size:11px;text-transform:uppercase;letter-spacing:0.03em;color:#6b7280">Price</th>
+              <th style="padding:8px 12px;font-size:11px;text-transform:uppercase;letter-spacing:0.03em;color:#6b7280">Rev Growth (YoY)</th>
+              <th style="padding:8px 12px;font-size:11px;text-transform:uppercase;letter-spacing:0.03em;color:#6b7280">EPS Growth (YoY)</th>
+              <th style="padding:8px 12px;font-size:11px;text-transform:uppercase;letter-spacing:0.03em;color:#6b7280">Below 52w High</th>
+              <th style="padding:8px 12px;font-size:11px;text-transform:uppercase;letter-spacing:0.03em;color:#6b7280">Technical Signals</th>
+              <th style="padding:8px 12px;font-size:11px;text-transform:uppercase;letter-spacing:0.03em;color:#6b7280;text-align:center">Score</th>
+            </tr>
+            {_quality_value_rows(matches)}
+          </table>
+        </div>
+    """
+
+
+def build_html(
+    matches: list[dict],
+    run_date: date,
+    universe_size: int | None = None,
+    fetched_count: int | None = None,
+    quality_value_matches: list[dict] | None = None,
+) -> str:
+    quality_value_matches = quality_value_matches or []
     bullish, bearish, other = _bucket_matches(matches)
 
     stats_bits = [f"{len(matches)} matched"]
+    if quality_value_matches:
+        stats_bits.append(f"{len(quality_value_matches)} quality-at-discount")
     if fetched_count is not None:
         stats_bits.insert(0, f"{fetched_count} screened")
     if universe_size is not None:
@@ -130,7 +189,8 @@ def build_html(matches: list[dict], run_date: date, universe_size: int | None = 
     stats_line = " · ".join(stats_bits)
 
     sections = (
-        _section("Oversold / Bullish Signals", "#1a7f37", bullish)
+        _quality_value_section(quality_value_matches)
+        + _section("Oversold / Bullish Signals", "#1a7f37", bullish)
         + _section("Overbought / Bearish Signals", "#b42318", bearish)
         + _section("Other Signals (Volume Only / Mixed)", "#6b7280", other)
     )
@@ -157,8 +217,15 @@ def build_html(matches: list[dict], run_date: date, universe_size: int | None = 
     """
 
 
-def send_digest(matches: list[dict], run_date: date, universe_size: int | None = None, fetched_count: int | None = None) -> None:
-    if not matches:
+def send_digest(
+    matches: list[dict],
+    run_date: date,
+    universe_size: int | None = None,
+    fetched_count: int | None = None,
+    quality_value_matches: list[dict] | None = None,
+) -> None:
+    quality_value_matches = quality_value_matches or []
+    if not matches and not quality_value_matches:
         print("No matches today — no email sent.")
         return
 
@@ -170,11 +237,11 @@ def send_digest(matches: list[dict], run_date: date, universe_size: int | None =
     msg["Subject"] = f"[Stock Screener] {len(matches)} matches — {run_date.isoformat()}"
     msg["From"] = smtp_user
     msg["To"] = ", ".join(recipients)
-    msg.attach(MIMEText(build_html(matches, run_date, universe_size, fetched_count), "html"))
+    msg.attach(MIMEText(build_html(matches, run_date, universe_size, fetched_count, quality_value_matches), "html"))
 
     with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
         server.starttls()
         server.login(smtp_user, smtp_password)
         server.sendmail(smtp_user, recipients, msg.as_string())
 
-    print(f"Sent digest with {len(matches)} matches to {recipients}")
+    print(f"Sent digest with {len(matches)} technical + {len(quality_value_matches)} quality-at-discount matches to {recipients}")

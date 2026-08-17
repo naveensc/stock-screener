@@ -11,6 +11,8 @@ from dotenv import load_dotenv
 
 from data import fetch_history, load_universe
 from email_digest import send_digest
+from fundamentals import fetch_fundamentals
+from quality_value import screen_quality_value
 from screen import screen_universe
 
 load_dotenv()  # no-op in GitHub Actions (no .env file there); loads local .env for dev runs
@@ -34,7 +36,19 @@ def main() -> None:
     matches = screen_universe(price_data, rules, ticker_info)
     logger.info("%d ticker(s) matched at least one criterion", len(matches))
 
-    send_digest(matches, date.today(), universe_size=len(tickers), fetched_count=len(price_data))
+    fundamentals = fetch_fundamentals(tickers)
+    logger.info("Fetched fundamentals for %d/%d tickers", len(fundamentals), len(tickers))
+
+    quality_value_matches = screen_quality_value(price_data, fundamentals, rules, ticker_info)
+    logger.info("%d ticker(s) matched the quality-at-a-discount screen", len(quality_value_matches))
+
+    send_digest(
+        matches,
+        date.today(),
+        universe_size=len(tickers),
+        fetched_count=len(price_data),
+        quality_value_matches=quality_value_matches,
+    )
 
 
 if __name__ == "__main__":
