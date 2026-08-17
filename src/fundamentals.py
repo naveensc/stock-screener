@@ -13,6 +13,7 @@ treats missing fundamentals as "can't confirm quality" rather than a pass.
 """
 
 import logging
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, timedelta
@@ -25,10 +26,34 @@ TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
 FACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik:010d}.json"
 HEADERS = {"User-Agent": "stock-screener research naveensc@gmail.com"}
 
-MAX_WORKERS = 5
+MAX_WORKERS = 8
 MAX_RETRIES = 3
 RETRY_BACKOFF_SECONDS = 5
-REQUEST_DELAY_SECONDS = 0.15  # stay well within SEC's fair-use rate limit
+REQUEST_MIN_INTERVAL_SECONDS = 0.2  # global pace across all workers — SEC's fair-use limit is ~10 req/sec
+
+
+class _RateLimiter:
+    """Paces requests to a fixed global interval regardless of how many threads call it —
+    a per-thread sleep isn't enough, since N concurrent threads each sleeping the same delay
+    still collectively fire at N times the intended rate.
+    """
+
+    def __init__(self, min_interval: float):
+        self._min_interval = min_interval
+        self._lock = threading.Lock()
+        self._next_allowed = 0.0
+
+    def wait(self) -> None:
+        with self._lock:
+            now = time.monotonic()
+            start = max(now, self._next_allowed)
+            self._next_allowed = start + self._min_interval
+        sleep_for = start - now
+        if sleep_for > 0:
+            time.sleep(sleep_for)
+
+
+_rate_limiter = _RateLimiter(REQUEST_MIN_INTERVAL_SECONDS)
 
 REVENUE_TAGS = ["RevenueFromContractWithCustomerExcludingAssessedTax", "Revenues", "SalesRevenueNet"]
 EPS_TAGS = ["EarningsPerShareDiluted", "EarningsPerShareBasic"]
@@ -59,12 +84,15 @@ def _quarterly_series(gaap: dict, tags: list[str]) -> list[dict]:
         by_end = {}
         for unit_entries in concept["units"].values():
             for entry in unit_entries:
-                days = (date.fromisoformat(entry["end"]) - date.fromisoformat(entry["start"])).days
+                start, end = entry.get("start"), entry.get("end")
+                if start is None or end is None:
+                    continue  # instant-in-time facts (no "start") can be mixed into the same array
+                days = (date.fromisoformat(end) - date.fromisoformat(start)).days
                 if not (MIN_QUARTER_DAYS <= days <= MAX_QUARTER_DAYS):
                     continue
-                existing = by_end.get(entry["end"])
+                existing = by_end.get(end)
                 if existing is None or entry["filed"] > existing["filed"]:
-                    by_end[entry["end"]] = entry
+                    by_end[end] = entry
         if by_end:
             return sorted(by_end.values(), key=lambda e: e["end"])
     return []
@@ -145,7 +173,7 @@ def fetch_fundamentals(tickers: list[str]) -> dict[str, dict]:
         url = FACTS_URL.format(cik=cik)
         for attempt in range(1, MAX_RETRIES + 1):
             try:
-                time.sleep(REQUEST_DELAY_SECONDS)
+                _rate_limiter.wait()
                 resp = requests.get(url, headers=HEADERS, timeout=30)
                 if resp.status_code == 404:
                     return ticker, None
