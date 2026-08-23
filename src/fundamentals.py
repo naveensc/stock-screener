@@ -33,6 +33,8 @@ HEADERS = {"User-Agent": "stock-screener research naveensc@gmail.com"}
 MAX_WORKERS = 8
 MAX_RETRIES = 3
 RETRY_BACKOFF_SECONDS = 5
+PROGRESS_LOG_INTERVAL = 250  # this fetch can run silently for 5-10+ minutes otherwise, which
+# looks like a hung job in CI — a heartbeat keeps the log visibly alive
 REQUEST_MIN_INTERVAL_SECONDS = 0.2  # global pace across all workers — SEC's fair-use limit is ~10 req/sec
 
 
@@ -246,11 +248,14 @@ def fetch_company_facts(tickers: list[str]) -> dict[str, dict]:
         return ticker, None
 
     result: dict[str, dict] = {}
+    total = len(tickers)
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         futures = [executor.submit(_fetch_one, ticker) for ticker in tickers]
-        for future in as_completed(futures):
+        for processed, future in enumerate(as_completed(futures), start=1):
             ticker, facts = future.result()
             if facts is not None:
                 result[ticker] = facts
+            if processed % PROGRESS_LOG_INTERVAL == 0 or processed == total:
+                logger.info("SEC EDGAR fetch progress: %d/%d tickers processed (%d with data)", processed, total, len(result))
 
     return result
