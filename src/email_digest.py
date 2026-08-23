@@ -210,7 +210,7 @@ def build_html(
         {sections}
 
         <p style="text-align:center;color:#aaa;font-size:11px;margin-top:8px">
-          Generated automatically · S&amp;P 500 + NASDAQ-100 · free/delayed data via Yahoo Finance
+          Generated automatically · S&amp;P 500 + NASDAQ-100 + Russell 2000, $10B+ market cap · free/delayed data via Yahoo Finance
         </p>
       </div>
     </body></html>

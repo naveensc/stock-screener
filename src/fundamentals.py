@@ -1,15 +1,18 @@
-"""Fetch fundamentals (YoY revenue/EPS growth, margin trend) from SEC EDGAR's free XBRL API.
+"""Fetch company facts (for market cap + fundamentals) from SEC EDGAR's free XBRL API.
 
 No API key, no cost — SEC EDGAR is the official source and covers virtually every
-US-listed filer. The tradeoff: it only has reported actuals (no analyst consensus
-estimates), so there's no earnings-beat/miss detection here, only growth and margin
-trend off the two most recent comparable quarters.
+US-listed filer. `fetch_company_facts` does the one (rate-limited) network round-trip per
+ticker; `extract_shares_outstanding` and `compute_fundamentals` are pure functions that both
+derive their answer from that same payload, so market-cap filtering and fundamentals scoring
+never require a second fetch.
 
-Companies tag the same concept inconsistently (e.g. some use `Revenues`, others
-`RevenueFromContractWithCustomerExcludingAssessedTax`), so each metric tries a
-fallback chain of tags. Tickers without a clean quarter-over-quarter-a-year-ago
-match for every required tag are omitted entirely — the downstream hard filter
-treats missing fundamentals as "can't confirm quality" rather than a pass.
+Fundamentals-wise, the tradeoff is that EDGAR only has reported actuals (no analyst consensus
+estimates), so there's no earnings-beat/miss detection here, only growth and margin trend off
+the two most recent comparable quarters. Companies also tag the same concept inconsistently
+(e.g. some use `Revenues`, others `RevenueFromContractWithCustomerExcludingAssessedTax`), so
+each metric tries a fallback chain of tags. Tickers without a clean quarter-over-quarter-a-
+year-ago match for every required tag come back as None — the downstream hard filter treats
+missing fundamentals as "can't confirm quality" rather than a pass.
 """
 
 import logging
@@ -18,6 +21,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, timedelta
 
+import pandas as pd
 import requests
 
 logger = logging.getLogger(__name__)
@@ -59,6 +63,8 @@ REVENUE_TAGS = ["RevenueFromContractWithCustomerExcludingAssessedTax", "Revenues
 EPS_TAGS = ["EarningsPerShareDiluted", "EarningsPerShareBasic"]
 GROSS_PROFIT_TAGS = ["GrossProfit"]
 OPERATING_INCOME_TAGS = ["OperatingIncomeLoss"]
+SHARES_OUTSTANDING_DEI_TAGS = ["EntityCommonStockSharesOutstanding"]
+SHARES_OUTSTANDING_GAAP_TAGS = ["CommonStockSharesOutstanding"]
 
 MIN_QUARTER_DAYS = 80
 MAX_QUARTER_DAYS = 100
@@ -96,6 +102,57 @@ def _quarterly_series(gaap: dict, tags: list[str]) -> list[dict]:
         if by_end:
             return sorted(by_end.values(), key=lambda e: e["end"])
     return []
+
+
+def _latest_instant(concept: dict) -> dict | None:
+    """Returns the most-recently-filed instant-in-time entry for a concept (point-in-time
+    facts like shares outstanding have no "start", unlike the duration facts above)."""
+    best = None
+    for unit_entries in concept["units"].values():
+        for entry in unit_entries:
+            if entry.get("start") is not None or entry.get("end") is None:
+                continue
+            if best is None or entry["filed"] > best["filed"]:
+                best = entry
+    return best
+
+
+def extract_shares_outstanding(facts: dict) -> float | None:
+    """Returns the most recently reported shares outstanding, or None if untagged."""
+    dei = facts.get("facts", {}).get("dei", {})
+    gaap = facts.get("facts", {}).get("us-gaap", {})
+    for source, tags in ((dei, SHARES_OUTSTANDING_DEI_TAGS), (gaap, SHARES_OUTSTANDING_GAAP_TAGS)):
+        for tag in tags:
+            concept = source.get(tag)
+            if concept:
+                entry = _latest_instant(concept)
+                if entry:
+                    return entry["val"]
+    return None
+
+
+def filter_by_market_cap(
+    tickers: list[str],
+    price_data: dict[str, pd.DataFrame],
+    company_facts: dict[str, dict],
+    min_market_cap: float,
+) -> list[str]:
+    """Returns the tickers whose market cap (shares outstanding x latest close) meets the
+    floor. Tickers without confirmable shares-outstanding data are excluded rather than
+    assumed to pass.
+    """
+    qualifying = []
+    for ticker in tickers:
+        facts = company_facts.get(ticker)
+        df = price_data.get(ticker)
+        if facts is None or df is None or df.empty:
+            continue
+        shares = extract_shares_outstanding(facts)
+        if shares is None:
+            continue
+        if shares * df["Close"].iloc[-1] >= min_market_cap:
+            qualifying.append(ticker)
+    return qualifying
 
 
 def _latest_and_yoy(gaap: dict, tags: list[str]) -> tuple[float, float] | None:
@@ -157,11 +214,12 @@ def compute_fundamentals(facts: dict) -> dict | None:
     }
 
 
-def fetch_fundamentals(tickers: list[str]) -> dict[str, dict]:
-    """Fetch and compute fundamentals for each ticker via SEC EDGAR, with retries.
+def fetch_company_facts(tickers: list[str]) -> dict[str, dict]:
+    """Fetch raw SEC EDGAR companyfacts JSON for each ticker, with retries and rate limiting.
 
-    Returns dict of ticker -> {revenue_growth, eps_growth, margin_improved}. Tickers with no
-    SEC filer match, or without enough tagged/discrete-quarter history, are omitted.
+    Returns dict of ticker -> facts JSON. Tickers with no SEC filer match are omitted. Callers
+    derive both market cap (extract_shares_outstanding) and growth/margin metrics
+    (compute_fundamentals) from the same fetched payload — no second round of requests needed.
     """
     ticker_to_cik = load_ticker_to_cik()
 
@@ -178,11 +236,11 @@ def fetch_fundamentals(tickers: list[str]) -> dict[str, dict]:
                 if resp.status_code == 404:
                     return ticker, None
                 resp.raise_for_status()
-                return ticker, compute_fundamentals(resp.json())
+                return ticker, resp.json()
             except Exception as exc:
-                logger.warning("Fundamentals fetch failed for %s (attempt %d/%d): %s", ticker, attempt, MAX_RETRIES, exc)
+                logger.warning("Company facts fetch failed for %s (attempt %d/%d): %s", ticker, attempt, MAX_RETRIES, exc)
                 if attempt == MAX_RETRIES:
-                    logger.error("Giving up on fundamentals for %s", ticker)
+                    logger.error("Giving up on company facts for %s", ticker)
                     return ticker, None
                 time.sleep(RETRY_BACKOFF_SECONDS * attempt)
         return ticker, None
@@ -191,8 +249,8 @@ def fetch_fundamentals(tickers: list[str]) -> dict[str, dict]:
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         futures = [executor.submit(_fetch_one, ticker) for ticker in tickers]
         for future in as_completed(futures):
-            ticker, metrics = future.result()
-            if metrics is not None:
-                result[ticker] = metrics
+            ticker, facts = future.result()
+            if facts is not None:
+                result[ticker] = facts
 
     return result

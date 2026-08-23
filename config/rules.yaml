@@ -1,5 +1,11 @@
 # Screening thresholds — see PLAN.md for the reasoning behind each default.
 
+# Applied to the whole universe before either screen below runs — keeps both screens focused
+# on large/mega-cap names instead of drowning in Russell 2000 small-cap noise.
+universe_filters:
+  min_market_cap: 10000000000 # $10B. Tickers whose market cap can't be confirmed (no SEC
+  # shares-outstanding data) are excluded rather than assumed to pass.
+
 rsi:
   period: 14
   lookback_days: 252 # trading days (~1yr) used to build each ticker's own RSI distribution

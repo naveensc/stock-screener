@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 
 from data import fetch_history, load_universe
 from email_digest import send_digest
-from fundamentals import fetch_fundamentals
+from fundamentals import compute_fundamentals, fetch_company_facts, filter_by_market_cap
 from quality_value import screen_quality_value
 from screen import screen_universe
 
@@ -33,11 +33,28 @@ def main() -> None:
     price_data = fetch_history(tickers)
     logger.info("Fetched price history for %d/%d tickers", len(price_data), len(tickers))
 
+    company_facts = fetch_company_facts(tickers)
+    logger.info("Fetched SEC filings for %d/%d tickers", len(company_facts), len(tickers))
+
+    min_market_cap = rules["universe_filters"]["min_market_cap"]
+    qualifying_tickers = filter_by_market_cap(tickers, price_data, company_facts, min_market_cap)
+    logger.info(
+        "%d/%d tickers meet the $%.0fB market cap floor",
+        len(qualifying_tickers),
+        len(tickers),
+        min_market_cap / 1e9,
+    )
+    price_data = {t: price_data[t] for t in qualifying_tickers}
+
     matches = screen_universe(price_data, rules, ticker_info)
     logger.info("%d ticker(s) matched at least one criterion", len(matches))
 
-    fundamentals = fetch_fundamentals(tickers)
-    logger.info("Fetched fundamentals for %d/%d tickers", len(fundamentals), len(tickers))
+    fundamentals = {}
+    for ticker in qualifying_tickers:
+        computed = compute_fundamentals(company_facts[ticker])
+        if computed is not None:
+            fundamentals[ticker] = computed
+    logger.info("Computed fundamentals for %d/%d qualifying tickers", len(fundamentals), len(qualifying_tickers))
 
     quality_value_matches = screen_quality_value(price_data, fundamentals, rules, ticker_info)
     logger.info("%d ticker(s) matched the quality-at-a-discount screen", len(quality_value_matches))
