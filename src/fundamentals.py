@@ -133,17 +133,15 @@ def extract_shares_outstanding(facts: dict) -> float | None:
     return None
 
 
-def filter_by_market_cap(
+def compute_market_caps(
     tickers: list[str],
     price_data: dict[str, pd.DataFrame],
     company_facts: dict[str, dict],
-    min_market_cap: float,
-) -> list[str]:
-    """Returns the tickers whose market cap (shares outstanding x latest close) meets the
-    floor. Tickers without confirmable shares-outstanding data are excluded rather than
-    assumed to pass.
+) -> dict[str, float]:
+    """Returns {ticker: market_cap} (shares outstanding x latest close). Tickers without
+    confirmable shares-outstanding or price data are omitted rather than assumed to be zero.
     """
-    qualifying = []
+    market_caps = {}
     for ticker in tickers:
         facts = company_facts.get(ticker)
         df = price_data.get(ticker)
@@ -152,9 +150,8 @@ def filter_by_market_cap(
         shares = extract_shares_outstanding(facts)
         if shares is None:
             continue
-        if shares * df["Close"].iloc[-1] >= min_market_cap:
-            qualifying.append(ticker)
-    return qualifying
+        market_caps[ticker] = shares * df["Close"].iloc[-1]
+    return market_caps
 
 
 def _latest_and_yoy(gaap: dict, tags: list[str]) -> tuple[float, float] | None:

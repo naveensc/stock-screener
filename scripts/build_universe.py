@@ -8,13 +8,27 @@ Russell 2000 has no free official constituent list either, so it's sourced
 live from IWM (iShares Russell 2000 ETF) — a public, unauthenticated JSON
 endpoint that BlackRock's own fund page calls to render its holdings table.
 
+Also computes and stores each ticker's market cap (shares outstanding from SEC EDGAR x a
+recent close from yfinance), so the daily run (main.py) can filter out sub-$10B tickers by
+reading this column before making a single network call, instead of fetching full price
+history + SEC filings for the whole universe just to find out who gets excluded. This does
+mean market cap is only as fresh as the last time this script was run, not computed daily —
+acceptable for a coarse floor that a company doesn't cross and re-cross day to day.
+
 Run this occasionally to refresh the ticker list as index membership changes:
     python scripts/build_universe.py
 """
 
+import sys
+from pathlib import Path
+
 import pandas as pd
 import requests
 from nasdaq100_snapshot import NASDAQ_100
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+from data import fetch_history  # noqa: E402
+from fundamentals import compute_market_caps, fetch_company_facts  # noqa: E402
 
 SP500_URL = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
 IWM_HOLDINGS_URL = "https://www.ishares.com/varnish-api/blk-one01-product-data/product-data/api/v2/get-product-data"
@@ -97,15 +111,25 @@ def main() -> None:
     # Merge with S&P 500 taking precedence for overlapping tickers (freshest, scraped live),
     # then NASDAQ-100, then Russell 2000 (small-cap; no expected overlap with the other two).
     combined = {**russell2000, **nasdaq100, **sp500}
+    tickers = list(combined.keys())
+
+    print(f"Computing market cap for {len(tickers)} tickers (SEC EDGAR is rate-limited — this takes a while)...")
+    price_data = fetch_history(tickers, period="5d")  # just need a recent close, not full history
+    company_facts = fetch_company_facts(tickers)
+    market_caps = compute_market_caps(tickers, price_data, company_facts)
 
     out_path = "config/universe.csv"
-    rows = [{"ticker": ticker, "name": name, "sector": sector} for ticker, (name, sector) in combined.items()]
+    rows = [
+        {"ticker": ticker, "name": name, "sector": sector, "market_cap": market_caps.get(ticker)}
+        for ticker, (name, sector) in combined.items()
+    ]
     pd.DataFrame(rows).sort_values("ticker").to_csv(out_path, index=False)
 
     print(f"S&P 500: {len(sp500)} tickers")
     print(f"NASDAQ-100: {len(nasdaq100)} tickers")
     print(f"Russell 2000: {len(russell2000)} tickers")
     print(f"Combined unique: {len(combined)} tickers -> {out_path}")
+    print(f"Market cap confirmed for {len(market_caps)}/{len(tickers)} tickers")
 
 
 if __name__ == "__main__":

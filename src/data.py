@@ -19,7 +19,7 @@ RETRY_BACKOFF_SECONDS = 5
 
 
 def load_universe(path: str = "config/universe.csv") -> pd.DataFrame:
-    """Returns a DataFrame with columns: ticker, name, sector."""
+    """Returns a DataFrame with columns: ticker, name, sector, market_cap."""
     return pd.read_csv(path)
 
 
