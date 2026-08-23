@@ -58,10 +58,9 @@ def fetch_history(tickers: list[str], period: str = "2y") -> dict[str, pd.DataFr
         if data is None:
             continue
 
-        single_ticker = len(chunk) == 1
         for ticker in chunk:
             try:
-                df = data if single_ticker else data[ticker]
+                df = data[ticker]
             except KeyError:
                 continue
             df = df.dropna(how="all")
