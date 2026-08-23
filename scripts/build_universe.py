@@ -25,6 +25,21 @@ HEADERS = {"User-Agent": "Mozilla/5.0"}
 # couple of spots; normalize so sectors are consistent across the merged universe.
 SECTOR_ALIASES = {"Communication": "Communication Services"}
 
+# IWM's feed lists these share classes without the dash Yahoo Finance/SEC use (verified against
+# SEC's own ticker list, which has no filer under the un-dashed form but does under this one) —
+# without this, yfinance can't find price data for these tickers at all.
+TICKER_CORRECTIONS = {
+    "MOGA": "MOG-A",  # Moog Inc Class A
+    "BHA": "BH-A",  # Biglari Holdings Class A
+    "CRDA": "CRD-A",  # Crawford & Company Class A
+    "GEFB": "GEF-B",  # Greif Inc Class B
+}
+
+# Not real tradeable common equity, so yfinance always fails on them — merger-related
+# contingent value rights (CVR) and an escrow claim from IWM's feed, plus a couple of tickers
+# for companies no longer actively trading (verified: none resolve to an active SEC filer).
+EXCLUDED_TICKERS = {"ADRO", "AKE", "GTXI", "INH", "P5N994", "PDLI", "SBT", "THRD"}
+
 
 def fetch_sp500() -> dict[str, tuple[str, str]]:
     """Returns {ticker: (name, sector)}."""
@@ -66,6 +81,9 @@ def fetch_russell2000() -> dict[str, tuple[str, str]]:
         points["assetClass"]["formattedValue"],
     ):
         if asset_class != "Equity" or ticker == "-":
+            continue
+        ticker = TICKER_CORRECTIONS.get(ticker, ticker)
+        if ticker in EXCLUDED_TICKERS:
             continue
         result[ticker] = (name.title(), SECTOR_ALIASES.get(sector, sector))
     return result

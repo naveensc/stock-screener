@@ -8,6 +8,11 @@ import yfinance as yf
 
 logger = logging.getLogger(__name__)
 
+# yfinance logs a delisted/no-data ticker as an ERROR by default, which looks alarming in CI
+# output even though it's expected and already handled below (the ticker is just omitted from
+# the result). Quiet it down to avoid that scroll of red text being mistaken for a real failure.
+logging.getLogger("yfinance").setLevel(logging.CRITICAL)
+
 CHUNK_SIZE = 75
 MAX_RETRIES = 3
 RETRY_BACKOFF_SECONDS = 5
