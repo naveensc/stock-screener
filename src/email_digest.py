@@ -204,6 +204,11 @@ def _top_ideas_rows(top_ideas: list[dict]) -> str:
             f"<td style='padding:10px 12px;border-bottom:1px solid #eee'>{badges}</td>"
             f"<td style='padding:10px 12px;border-bottom:1px solid #eee;text-align:center;font-weight:700;color:#111'>{m['composite_score']:.1f}</td>"
             "</tr>"
+            f"<tr style='background:{row_bg}'>"
+            f"<td></td>"
+            f"<td colspan='5' style='padding:0 12px 12px 12px;border-bottom:1px solid #eee;color:#555;"
+            f"font-size:12px;line-height:1.5'>{m['rationale']}</td>"
+            "</tr>"
         )
     return rows
 

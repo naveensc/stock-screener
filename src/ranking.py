@@ -38,6 +38,43 @@ def _regime_adjusted_technical_score(signals: list[str], regime: str, misaligned
     return score
 
 
+def _signal_alignment_phrase(signals: list[str], regime: str) -> str:
+    aligned_set = BULLISH_SIGNALS if regime == "uptrend" else BEARISH_SIGNALS
+    misaligned_set = BEARISH_SIGNALS if regime == "uptrend" else BULLISH_SIGNALS
+    has_aligned = any(s in aligned_set for s in signals)
+    has_misaligned = any(s in misaligned_set for s in signals)
+    if has_aligned and has_misaligned:
+        return f"mixed relative to the current market {regime}"
+    if has_misaligned:
+        return f"running counter to the current market {regime}"
+    if has_aligned:
+        return f"aligned with the current market {regime}"
+    return f"neutral to the current market {regime}"
+
+
+def _build_rationale(signals: list[str], regime: str, is_confluence: bool, quality_value: dict | None) -> str:
+    """One or two short, factual sentences on why a pick made the shortlist — describes the
+    data behind the score, not investment advice."""
+    sentences = []
+
+    if quality_value is not None:
+        sentences.append(
+            f"Revenue grew {quality_value['revenue_growth'] * 100:.0f}% and EPS grew "
+            f"{quality_value['eps_growth'] * 100:.0f}% year-over-year with improving margins, while the "
+            f"stock trades {quality_value['pct_below_high'] * 100:.0f}% below its 52-week high without "
+            f"falling more than its own sector, a possible gap between fundamentals and price."
+        )
+
+    if signals:
+        signal_text = ", ".join(s.lower() for s in signals)
+        sentences.append(f"Today's technical signals ({signal_text}) are {_signal_alignment_phrase(signals, regime)}.")
+
+    if is_confluence:
+        sentences.append("Both the fundamental and technical screens agree on this one, which is why it ranks at the top.")
+
+    return " ".join(sentences)
+
+
 def build_top_ideas(
     matches: list[dict],
     quality_value_matches: list[dict],
@@ -79,6 +116,7 @@ def build_top_ideas(
                 "composite_score": technical_component + fundamental_component + confluence_bonus,
                 "confluence": is_confluence,
                 "source": "confluence" if is_confluence else ("quality_value" if quality_value else "technical"),
+                "rationale": _build_rationale(signals, regime, is_confluence, quality_value),
             }
         )
 
