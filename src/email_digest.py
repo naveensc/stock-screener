@@ -26,6 +26,13 @@ DIRECTION_COLORS = {
     "neutral": ("#0550ae", "#e8f0fe"),
 }
 
+# Labels/colors for how a Top Ideas pick was sourced — used only in that section.
+SOURCE_LABELS = {
+    "confluence": ("Confluence", "#7c3aed", "#ede9fe"),
+    "quality_value": ("Quality+Value", "#b45309", "#fef3c7"),
+    "technical": ("Technical", "#0550ae", "#e8f0fe"),
+}
+
 
 def _signal_badge(signal: str) -> str:
     direction = SIGNAL_DIRECTION.get(signal, "neutral")
@@ -169,19 +176,82 @@ def _quality_value_section(matches: list[dict]) -> str:
     """
 
 
+def _source_badge(source: str) -> str:
+    label, fg, bg = SOURCE_LABELS[source]
+    return (
+        f"<span style='display:inline-block;padding:3px 9px;border-radius:12px;font-size:11px;"
+        f"font-weight:700;color:{fg};background:{bg};white-space:nowrap'>{label}</span>"
+    )
+
+
+def _top_ideas_rows(top_ideas: list[dict]) -> str:
+    rows = ""
+    for i, m in enumerate(top_ideas):
+        row_bg = "#ffffff" if i % 2 == 0 else "#fafafa"
+        badges = "".join(_signal_badge(s) for s in m["signals"]) or "<span style='color:#999;font-size:12px'>none</span>"
+        ticker_link = f"https://finance.yahoo.com/quote/{m['ticker']}"
+        rows += (
+            f"<tr style='background:{row_bg}'>"
+            f"<td style='padding:10px 12px;border-bottom:1px solid #eee;font-weight:700;color:#111;font-size:15px'>{i + 1}</td>"
+            f"<td style='padding:10px 12px;border-bottom:1px solid #eee'>"
+            f"<a href='{ticker_link}' style='color:#111;font-weight:700;text-decoration:none;font-size:14px'>{m['ticker']}</a>"
+            f"<div style='font-size:12px;color:#666;margin-top:2px'>{m['name']}</div>"
+            f"<span style='display:inline-block;margin-top:3px;padding:1px 7px;border-radius:8px;"
+            f"font-size:10px;font-weight:600;color:#555;background:#f0f0f0'>{m['sector']}</span>"
+            "</td>"
+            f"<td style='padding:10px 12px;border-bottom:1px solid #eee;color:#333'>${m['price']:.2f}</td>"
+            f"<td style='padding:10px 12px;border-bottom:1px solid #eee'>{_source_badge(m['source'])}</td>"
+            f"<td style='padding:10px 12px;border-bottom:1px solid #eee'>{badges}</td>"
+            f"<td style='padding:10px 12px;border-bottom:1px solid #eee;text-align:center;font-weight:700;color:#111'>{m['composite_score']:.1f}</td>"
+            "</tr>"
+        )
+    return rows
+
+
+def _top_ideas_section(top_ideas: list[dict], regime: str | None) -> str:
+    if not top_ideas:
+        return ""
+    regime_label = "Uptrend" if regime == "uptrend" else "Downtrend"
+    regime_color = "#1a7f37" if regime == "uptrend" else "#b42318"
+    return f"""
+        <div style="background:#fff;border-radius:8px;overflow:hidden;margin-bottom:20px;border:2px solid #111827">
+          <div style="padding:14px 16px;background:#111827;display:flex;justify-content:space-between;align-items:center">
+            <span style="font-size:14px;font-weight:700;text-transform:uppercase;letter-spacing:0.03em;color:#fff">Today's Top Ideas</span>
+            <span style="font-size:11px;font-weight:700;color:{regime_color};background:#fff;padding:3px 10px;border-radius:12px">Market: {regime_label}</span>
+          </div>
+          <table style="border-collapse:collapse;width:100%">
+            <tr style="background:#f9fafb;text-align:left">
+              <th style="padding:8px 12px;font-size:11px;text-transform:uppercase;letter-spacing:0.03em;color:#6b7280">#</th>
+              <th style="padding:8px 12px;font-size:11px;text-transform:uppercase;letter-spacing:0.03em;color:#6b7280">Ticker</th>
+              <th style="padding:8px 12px;font-size:11px;text-transform:uppercase;letter-spacing:0.03em;color:#6b7280">Price</th>
+              <th style="padding:8px 12px;font-size:11px;text-transform:uppercase;letter-spacing:0.03em;color:#6b7280">Source</th>
+              <th style="padding:8px 12px;font-size:11px;text-transform:uppercase;letter-spacing:0.03em;color:#6b7280">Signals</th>
+              <th style="padding:8px 12px;font-size:11px;text-transform:uppercase;letter-spacing:0.03em;color:#6b7280;text-align:center">Score</th>
+            </tr>
+            {_top_ideas_rows(top_ideas)}
+          </table>
+        </div>
+    """
+
+
 def build_html(
     matches: list[dict],
     run_date: date,
     universe_size: int | None = None,
     fetched_count: int | None = None,
     quality_value_matches: list[dict] | None = None,
+    top_ideas: list[dict] | None = None,
+    regime: str | None = None,
 ) -> str:
     quality_value_matches = quality_value_matches or []
+    top_ideas = top_ideas or []
     bullish, bearish, other = _bucket_matches(matches)
 
     stats_bits = [f"{len(matches)} matched"]
     if quality_value_matches:
         stats_bits.append(f"{len(quality_value_matches)} quality-at-discount")
+    if regime is not None:
+        stats_bits.append(f"market: {regime}")
     if fetched_count is not None:
         stats_bits.insert(0, f"{fetched_count} screened")
     if universe_size is not None:
@@ -189,7 +259,8 @@ def build_html(
     stats_line = " · ".join(stats_bits)
 
     sections = (
-        _quality_value_section(quality_value_matches)
+        _top_ideas_section(top_ideas, regime)
+        + _quality_value_section(quality_value_matches)
         + _section("Oversold / Bullish Signals", "#1a7f37", bullish)
         + _section("Overbought / Bearish Signals", "#b42318", bearish)
         + _section("Other Signals (Volume Only / Mixed)", "#6b7280", other)
@@ -223,8 +294,11 @@ def send_digest(
     universe_size: int | None = None,
     fetched_count: int | None = None,
     quality_value_matches: list[dict] | None = None,
+    top_ideas: list[dict] | None = None,
+    regime: str | None = None,
 ) -> None:
     quality_value_matches = quality_value_matches or []
+    top_ideas = top_ideas or []
     if not matches and not quality_value_matches:
         print("No matches today — no email sent.")
         return
@@ -233,15 +307,24 @@ def send_digest(
     smtp_password = os.environ["EMAIL_SMTP_PASSWORD"]
     recipients = [r.strip() for r in os.environ["RECIPIENTS"].split(",") if r.strip()]
 
+    subject_headline = f"Top {len(top_ideas)} ideas" if top_ideas else f"{len(matches)} matches"
     msg = MIMEMultipart("alternative")
-    msg["Subject"] = f"[Stock Screener] {len(matches)} matches — {run_date.isoformat()}"
+    msg["Subject"] = f"[Stock Screener] {subject_headline} — {run_date.isoformat()}"
     msg["From"] = smtp_user
     msg["To"] = ", ".join(recipients)
-    msg.attach(MIMEText(build_html(matches, run_date, universe_size, fetched_count, quality_value_matches), "html"))
+    msg.attach(
+        MIMEText(
+            build_html(matches, run_date, universe_size, fetched_count, quality_value_matches, top_ideas, regime),
+            "html",
+        )
+    )
 
     with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
         server.starttls()
         server.login(smtp_user, smtp_password)
         server.sendmail(smtp_user, recipients, msg.as_string())
 
-    print(f"Sent digest with {len(matches)} technical + {len(quality_value_matches)} quality-at-discount matches to {recipients}")
+    print(
+        f"Sent digest with {len(top_ideas)} top ideas, {len(matches)} technical + "
+        f"{len(quality_value_matches)} quality-at-discount matches to {recipients}"
+    )

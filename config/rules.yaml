@@ -36,3 +36,14 @@ quality_value:
   # ... unless it's below its long MA instead (uses ma_cross.slow above) — either counts as "priced low"
   trailing_return_window_days: 126 # ~6 months, used for the sector-attribution comparison
   max_sector_relative_underperformance: 0.05 # decline can't exceed the sector's median decline by more than this (5 percentage points)
+
+# Combines both screens into a single ranked daily shortlist — regime-aware (down-weights
+# signals fighting the broad market trend) and confluence-aware (rewards tickers both screens
+# agree on). See PLAN.md-equivalent design discussion for rationale.
+ranking:
+  top_n: 6
+  regime_ma_window: 200 # SPY vs. this MA determines uptrend/downtrend
+  regime_misaligned_weight: 0.5 # weight applied to a signal that points against the current regime (full weight is 1.0)
+  fundamental_weight: 5.0 # scales revenue_growth + eps_growth (typically 0.05-0.3) into technical-score-like units
+  discount_weight: 2.0 # scales pct_below_high (typically 0.15-0.5) into technical-score-like units
+  confluence_bonus: 2.0 # bonus for tickers matched by BOTH the technical and quality-value screens

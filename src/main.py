@@ -13,6 +13,7 @@ from data import fetch_history, load_universe
 from email_digest import send_digest
 from fundamentals import compute_fundamentals, fetch_company_facts, filter_by_market_cap
 from quality_value import screen_quality_value
+from ranking import build_top_ideas, market_regime
 from screen import screen_universe
 
 load_dotenv()  # no-op in GitHub Actions (no .env file there); loads local .env for dev runs
@@ -59,12 +60,21 @@ def main() -> None:
     quality_value_matches = screen_quality_value(price_data, fundamentals, rules, ticker_info)
     logger.info("%d ticker(s) matched the quality-at-a-discount screen", len(quality_value_matches))
 
+    spy_price_data = fetch_history(["SPY"])
+    regime = market_regime(spy_price_data["SPY"]["Close"], rules["ranking"]["regime_ma_window"])
+    logger.info("Market regime: %s (SPY vs. its %d-day MA)", regime, rules["ranking"]["regime_ma_window"])
+
+    top_ideas = build_top_ideas(matches, quality_value_matches, regime, rules["ranking"])
+    logger.info("Top %d idea(s): %s", len(top_ideas), [m["ticker"] for m in top_ideas])
+
     send_digest(
         matches,
         date.today(),
         universe_size=len(tickers),
         fetched_count=len(price_data),
         quality_value_matches=quality_value_matches,
+        top_ideas=top_ideas,
+        regime=regime,
     )
 
 
