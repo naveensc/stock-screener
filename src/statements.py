@@ -49,9 +49,16 @@ def value(period: dict, rows: list[str]) -> float | None:
     return None
 
 
+def _reported(periods: dict) -> list[str]:
+    """Period dates that have revenue, newest first. Right after a period closes Yahoo often adds
+    a placeholder column with a handful of rows and no results yet; those are skipped, or they'd
+    be taken as "the latest period" and every figure in it would read as missing."""
+    return [d for d in sorted(periods, reverse=True) if value(periods[d], REVENUE_ROWS) is not None]
+
+
 def ltm(quarterly: dict, rows: list[str]) -> float | None:
-    """Sum of the latest four quarters, or None if any is missing or they aren't consecutive."""
-    dates = sorted(quarterly, reverse=True)[:4]
+    """Sum of the latest four reported quarters, or None if any is missing or they aren't consecutive."""
+    dates = _reported(quarterly)[:4]
     if len(dates) < 4:
         return None
     if (date.fromisoformat(dates[0]) - date.fromisoformat(dates[3])).days > LTM_MAX_SPAN_DAYS:
@@ -65,12 +72,12 @@ def metric(raw: dict, rows: list[str]) -> tuple[float | None, str]:
     total = ltm(raw.get("quarterly", {}), rows)
     if total is not None:
         return total, "LTM"
-    latest = max(raw["annual"])
+    years = fiscal_years(raw)
+    latest = years[0] if years else max(raw["annual"])
     return value(raw["annual"][latest], rows), f"FY{latest[:4]}"
 
 
 def fiscal_years(raw: dict) -> list[str]:
-    """Annual period dates that have revenue, newest first. Yahoo's cash flow and balance sheet
-    often reach a year further back than the income statement; those periods are skipped."""
-    annual = raw["annual"]
-    return [d for d in sorted(annual, reverse=True) if value(annual[d], REVENUE_ROWS) is not None]
+    """Annual period dates that have revenue, newest first. Skips placeholder columns for a year
+    that just closed, and the extra year Yahoo's cash flow and balance sheet often reach back."""
+    return _reported(raw["annual"])

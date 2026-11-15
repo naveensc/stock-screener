@@ -166,6 +166,20 @@ def test_asset_model_bands(light, expected):
     assert r["asset_model"] == expected
 
 
+def test_placeholder_periods_for_a_just_closed_year_are_skipped():
+    # Yahoo adds a few-row column (no revenue, no income) right after a period closes. It must
+    # not be taken as the latest year or quarter (AMAT, RJF: "no net income").
+    quarters = [_fy(40, 5, 8, 1), _fy(45, 5, 9, 1), _fy(50, 6, 9, 1), _fy(55, 6, 10, 1)]
+    raw = make_raw("TEST", [_fy(100, 10, 12, 2), _fy(160, 20, 30, 3)], quarters)
+    raw["annual"]["2026-12-31"] = {"Ordinary Shares Number": 1e9, "Share Issued": 1e9}
+    raw["quarterly"]["2026-09-30"] = {"Ordinary Shares Number": 1e9}
+    r = analyze(raw)
+    assert r["fiscal_year"] == "FY2025"
+    assert r["profit_basis"] == "LTM" and r["profit_value"] == pytest.approx(36e6)
+    raw["quarterly"] = {}  # without quarterlies the fiscal-year fallback must skip the stub too
+    assert analyze(raw)["profit_basis"] == "FY2025"
+
+
 def test_single_year_of_revenue_is_insufficient():
     with pytest.raises(InsufficientData):
         analyze(make_raw("TEST", [_fy(100, 10, 12, 2)]))
