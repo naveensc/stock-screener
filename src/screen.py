@@ -1,4 +1,5 @@
-"""Apply the screening criteria to each ticker's price history and score/rank matches."""
+"""One-day technical events for a ticker (RSI extremes, golden/death cross, volume spike,
+Bollinger touches). The daily run shows them as alert tags; they don't feed the scores."""
 
 import pandas as pd
 
@@ -45,20 +46,3 @@ def screen_ticker(ticker: str, df: pd.DataFrame, rules: dict, ticker_info: dict)
         "rsi": rsi["rsi"],
     }
 
-
-def screen_universe(price_data: dict[str, pd.DataFrame], rules: dict, ticker_info: dict) -> list[dict]:
-    """Screen every ticker, returning matches sorted by score descending.
-
-    ticker_info: {ticker: {"name": ..., "sector": ...}}
-    """
-    matches = []
-    for ticker, df in price_data.items():
-        try:
-            result = screen_ticker(ticker, df, rules, ticker_info)
-        except Exception:
-            continue
-        if result:
-            matches.append(result)
-
-    matches.sort(key=lambda m: m["score"], reverse=True)
-    return matches

@@ -3,11 +3,30 @@ name: Daily Stock Screen
 on:
   schedule:
     - cron: "15 21 * * 1-5" # 21:15 UTC = 4:15 PM EST, Mon-Fri (shortly after market close)
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      backfill:
+        description: "Also score the previous N trading days (use 5 on the first run so 5-day movers work)"
+        default: "0"
+
+permissions:
+  contents: write # commit data/score_history.csv
+  pages: write # publish the stock cards
+  id-token: write
+
+concurrency:
+  group: daily-screen
+  cancel-in-progress: false
 
 jobs:
   screen:
     runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    env:
+      # Project Pages URL; the email's ticker links point at <SITE_URL>/cards/<TICKER>.html
+      SITE_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}
     steps:
       - uses: actions/checkout@v4
 
@@ -18,9 +37,40 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run screener
+      # Fundamentals are cached per ticker and refreshed ~1/5 of the universe per weekday;
+      # restoring the cache is what keeps the daily run fast and under Yahoo's rate limits.
+      - name: Restore fundamentals cache
+        uses: actions/cache@v4
+        with:
+          path: .cache/lifecycle
+          key: fundamentals-${{ github.run_id }}
+          restore-keys: fundamentals-
+
+      - name: Score the universe and build the site + email
+        run: python src/main.py --backfill ${{ github.event.inputs.backfill || 0 }}
+
+      - name: Commit score history
+        run: |
+          git config user.name "stock-screener-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add data/score_history.csv
+          git diff --cached --quiet || git commit -m "Daily scores $(date -u +%F)"
+          git push
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+      - name: Publish stock cards to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+      # After the deploy, so every link in the email already resolves.
+      - name: Send email
         env:
           EMAIL_SMTP_USER: ${{ secrets.EMAIL_SMTP_USER }}
           EMAIL_SMTP_PASSWORD: ${{ secrets.EMAIL_SMTP_PASSWORD }}
           RECIPIENTS: ${{ secrets.RECIPIENTS }}
-        run: python src/main.py
+        run: python src/email_digest.py email.html

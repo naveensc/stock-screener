@@ -1,7 +1,16 @@
-"""Build and send the daily HTML email digest of screener matches."""
+"""Build the daily email (HTML) and send it.
 
+The email is a summary that links out: every ticker opens its stock card on the published site.
+Mail clients strip <style> blocks and scripts, so everything here is tables with inline styles.
+
+    python src/email_digest.py email.html     # send a built email (subject = its <title>)
+"""
+
+import html
 import os
+import re
 import smtplib
+import sys
 from datetime import date
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -9,327 +18,219 @@ from email.mime.text import MIMEText
 SMTP_HOST = "smtp.gmail.com"
 SMTP_PORT = 587
 
-# Each signal has a direction — used both for badge color and for bucketing tickers
-# into the Oversold/Bullish vs Overbought/Bearish sections below.
-SIGNAL_DIRECTION = {
-    "RSI oversold": "bullish",
-    "RSI overbought": "bearish",
-    "Golden cross (50/200)": "bullish",
-    "Death cross (50/200)": "bearish",
-    "Volume spike": "neutral",
-    "At upper Bollinger Band": "bearish",
-    "At lower Bollinger Band": "bullish",
-}
-DIRECTION_COLORS = {
-    "bullish": ("#1a7f37", "#e6f4ea"),
-    "bearish": ("#b42318", "#fdeceb"),
-    "neutral": ("#0550ae", "#e8f0fe"),
-}
+SCORE_KEYS = ("quality", "valuation", "technical")
+SCORE_LABELS = {"quality": "Quality", "valuation": "Valuation", "technical": "Technical"}
+INK, MUTED, BORDER, PAPER = "#1d2116", "#6b6f60", "#e3e5da", "#f6f6f1"
+GREEN, AMBER, RED, OLIVE = "#2f7d32", "#b7791f", "#b4392c", "#4f5d2b"
+PHASES = {1: "Startup", 2: "Hyper Growth", 3: "Operating Leverage", 4: "Capital Return", 5: "Decline"}
+PHASE_COLORS = {1: "#6e44b3", 2: "#1f5fc4", 3: "#1b7d45", 4: "#9a5b00", 5: "#b8352a"}
+VERDICT_COLORS = {"Undervalued": GREEN, "Overvalued": RED}
+TH = f"padding:6px 8px;font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:{MUTED};text-align:left"
+TD = f"padding:8px;border-top:1px solid {BORDER};vertical-align:top;font-size:13px;color:{INK}"
 
-# Labels/colors for how a Top Ideas pick was sourced — used only in that section.
-SOURCE_LABELS = {
-    "confluence": ("Confluence", "#7c3aed", "#ede9fe"),
-    "quality_value": ("Quality+Value", "#b45309", "#fef3c7"),
-    "technical": ("Technical", "#0550ae", "#e8f0fe"),
-}
+e = html.escape
 
 
-def _signal_badge(signal: str) -> str:
-    direction = SIGNAL_DIRECTION.get(signal, "neutral")
-    fg, bg = DIRECTION_COLORS[direction]
-    return (
-        f"<span style='display:inline-block;padding:3px 9px;margin:2px 4px 2px 0;"
-        f"border-radius:12px;font-size:12px;font-weight:600;color:{fg};background:{bg};"
-        f"white-space:nowrap'>{signal}</span>"
-    )
+def _score_color(v: float | None) -> str:
+    if v is None:
+        return MUTED
+    return GREEN if v >= 70 else AMBER if v >= 40 else RED
 
 
-def _bucket_matches(matches: list[dict]) -> tuple[list[dict], list[dict], list[dict]]:
-    """Split into (oversold/bullish, overbought/bearish, other) by each ticker's net signal direction.
+def _bar(label: str, v: float | None) -> str:
+    """A labeled 0-100 bar as nested tables (divs with % widths aren't reliable in Outlook)."""
+    width = 0 if v is None else max(2, int(round(v)))
+    value = "–" if v is None else f"{v:.0f}"
+    fill = (f"<td width='{width}%' style='background:{_score_color(v)};height:6px;line-height:6px;font-size:0'>&nbsp;</td>"
+            if width else "")
+    return (f"<table role='presentation' width='100%' cellpadding='0' cellspacing='0' style='margin:1px 0'><tr>"
+            f"<td width='18' style='font-size:11px;color:{MUTED}'>{label[0]}</td>"
+            f"<td><table role='presentation' width='100%' cellpadding='0' cellspacing='0' style='background:{BORDER}'>"
+            f"<tr>{fill}<td style='height:6px;line-height:6px;font-size:0'>&nbsp;</td></tr></table></td>"
+            f"<td width='26' align='right' style='font-size:11px;font-weight:700;color:{INK}'>{value}</td></tr></table>")
 
-    Order within each bucket is preserved from the input (already score-sorted).
-    """
-    bullish, bearish, other = [], [], []
-    for m in matches:
-        directions = [SIGNAL_DIRECTION.get(s, "neutral") for s in m["signals"]]
-        bull_count = directions.count("bullish")
-        bear_count = directions.count("bearish")
-        if bull_count > bear_count:
-            bullish.append(m)
-        elif bear_count > bull_count:
-            bearish.append(m)
+
+def _pill(text: str, color: str) -> str:
+    return (f"<span style='display:inline-block;padding:1px 8px;border-radius:10px;font-size:11px;font-weight:700;"
+            f"color:{color};border:1px solid {color};white-space:nowrap'>{e(text)}</span>")
+
+
+def _ticker(r: dict, site_url: str) -> str:
+    url = f"{site_url}/cards/{r['ticker']}.html"
+    return (f"<a href='{e(url)}' style='color:{INK};font-weight:800;font-size:14px;text-decoration:none'>{e(r['ticker'])}</a>"
+            f"<div style='font-size:11px;color:{MUTED}'>{e(r['name'])}</div>")
+
+
+def _reason(r: dict) -> str:
+    """One line on why a stock ranks where it does: its strongest and weakest score, plus the
+    life-cycle phase, the model valuation and the trend."""
+    d = r["daily"]
+    present = sorted(((SCORE_LABELS[k], d[k]) for k in SCORE_KEYS if d[k] is not None), key=lambda x: -x[1])
+    bits = []
+    if len(present) >= 2:
+        bits.append(f"Strongest on {present[0][0].lower()} ({present[0][1]:.0f}), weakest on {present[-1][0].lower()} ({present[-1][1]:.0f}).")
+    valuation = r.get("valuation_verdict") or "n/a"
+    upside = r.get("base_upside")
+    if upside is not None:
+        valuation_text = f"DCF says {valuation.lower()} (base case {upside:+.0%})"
+    else:
+        valuation_text = f"no DCF possible, multiples say {valuation.lower()}"
+    bits.append(f"{r['phase_name']} phase; {valuation_text}; {d['trend_state'].lower()}.")
+    # The Valuation score is relative (vs this universe); the DCF verdict is absolute. When they
+    # disagree, say so rather than leave "Valuation 80" next to "Overvalued" unexplained.
+    v = d["valuation"]
+    if v is not None and v >= 60 and valuation == "Overvalued":
+        bits.append("Cheap relative to this universe, but not against its own DCF — the whole group may be richly priced.")
+    elif v is not None and v <= 40 and valuation == "Undervalued":
+        bits.append("Its DCF looks attractive, but peers screen cheaper on multiples.")
+    return " ".join(bits)
+
+
+def _section(title: str, subtitle: str, body: str, accent: str = INK) -> str:
+    return (f"<table role='presentation' width='100%' cellpadding='0' cellspacing='0' "
+            f"style='background:#fff;border:1px solid {BORDER};border-top:3px solid {accent};border-radius:8px;margin:0 0 16px'>"
+            f"<tr><td style='padding:14px 16px 4px'><div style='font-size:15px;font-weight:800;color:{INK}'>{e(title)}</div>"
+            f"<div style='font-size:12px;color:{MUTED};margin-top:2px'>{subtitle}</div></td></tr>"
+            f"<tr><td style='padding:4px 8px 10px'>{body}</td></tr></table>")
+
+
+def _top_ideas(results: list[dict], site_url: str, n: int) -> str:
+    rows = ""
+    for r in [r for r in results if r["daily"]["rank"] is not None][:n]:
+        d = r["daily"]
+        bars = "".join(_bar(SCORE_LABELS[k], d[k]) for k in SCORE_KEYS)
+        verdict = r.get("valuation_verdict") or "n/a"
+        basis = "DCF" if r.get("base_upside") is not None else "Multiples"
+        rows += (f"<tr><td style='{TD};font-weight:800;color:{MUTED}'>{d['rank']}</td>"
+                 f"<td style='{TD}'>{_ticker(r, site_url)}</td>"
+                 f"<td style='{TD};font-size:22px;font-weight:800;color:{_score_color(d['composite'])}'>{d['composite']:.0f}</td>"
+                 f"<td style='{TD};width:150px'>{bars}</td>"
+                 f"<td style='{TD}'>{_pill(PHASES[r['phase']], PHASE_COLORS[r['phase']])}<br>"
+                 f"<span style='font-size:11px;font-weight:700;color:{VERDICT_COLORS.get(verdict, MUTED)}'>{basis}: {e(verdict)}</span></td></tr>"
+                 f"<tr><td></td><td colspan='4' style='padding:0 8px 10px;font-size:12px;color:{MUTED};line-height:1.45'>{e(_reason(r))}</td></tr>")
+    head = (f"<tr><th style='{TH}'>#</th><th style='{TH}'>Ticker</th><th style='{TH}'>Score</th>"
+            f"<th style='{TH}'>Q · V · T</th><th style='{TH}'>Phase · DCF</th></tr>")
+    return f"<table role='presentation' width='100%' cellpadding='0' cellspacing='0'>{head}{rows}</table>"
+
+
+def _movers_table(movers: list[dict], by_ticker: dict, site_url: str, up: bool) -> str:
+    if not movers:
+        return f"<p style='font-size:12px;color:{MUTED};margin:6px 8px'>No moves of that size.</p>"
+    color = GREEN if up else RED
+    rows = ""
+    for m in movers:
+        r = by_ticker[m["ticker"]]
+        d5 = "" if m["d5"] is None else f"<div style='font-size:11px;color:{MUTED}'>{m['d5']:+.0f} over 5 runs</div>"
+        rows += (f"<tr><td style='{TD}'>{_ticker(r, site_url)}</td>"
+                 f"<td style='{TD};white-space:nowrap'><b style='font-size:16px;color:{color}'>{m['d1']:+.0f}</b>"
+                 f"<span style='color:{MUTED}'> → {m['composite']:.0f}</span>{d5}</td>"
+                 f"<td style='{TD};font-size:12px;color:{MUTED}'>{e(m['driver'])}</td></tr>")
+    return f"<table role='presentation' width='100%' cellpadding='0' cellspacing='0'>{rows}</table>"
+
+
+def _state_text(s: dict) -> str:
+    if s["kind"] == "Phase":
+        return f"{PHASES[s['from']]} → {PHASES[s['to']]}"
+    if s["kind"].startswith("Top"):
+        return f"entered {s['kind'].lower()} {s['to'][3:]}" if s["to"] != "out" else f"left the {s['kind'].lower()}"
+    return f"{s['from']} → {s['to']}"
+
+
+def _states(states: list[dict], by_ticker: dict, site_url: str) -> str:
+    order = {"Phase": 0, "Valuation": 1, "Trend": 2}
+    rows = ""
+    for s in sorted(states, key=lambda s: (order.get(s["kind"], 3), s["ticker"])):
+        r = by_ticker[s["ticker"]]
+        rows += (f"<tr><td style='{TD};width:90px'>{_ticker(r, site_url)}</td>"
+                 f"<td style='{TD};width:90px;font-size:11px;font-weight:700;color:{MUTED};text-transform:uppercase'>{e(s['kind'])}</td>"
+                 f"<td style='{TD}'>{e(_state_text(s))}</td></tr>")
+    return f"<table role='presentation' width='100%' cellpadding='0' cellspacing='0'>{rows}</table>"
+
+
+def _alerts(results: list[dict], site_url: str) -> str:
+    rows = ""
+    for r in results:
+        if r["daily"]["alerts"]:
+            tags = " ".join(_pill(a, OLIVE) for a in r["daily"]["alerts"])
+            rows += f"<tr><td style='{TD};width:90px'>{_ticker(r, site_url)}</td><td style='{TD};line-height:1.9'>{tags}</td></tr>"
+    return f"<table role='presentation' width='100%' cellpadding='0' cellspacing='0'>{rows}</table>" if rows else ""
+
+
+def build_html(results: list[dict], changed: dict, *, run_date: str, regime: str, universe_label: str,
+               error_count: int, risk_free: float, site_url: str, top_n: int, weights: dict[str, float],
+               min_change: float) -> tuple[str, str]:
+    """Returns (html, subject). `results` must be sorted by composite rank."""
+    by_ticker = {r["ticker"]: r for r in results}
+    ranked = [r for r in results if r["daily"]["rank"] is not None]
+    day = date.fromisoformat(run_date)
+    regime_color = GREEN if regime == "uptrend" else RED
+
+    recipe = " + ".join(f"{weights[k]:.0%} {SCORE_LABELS[k]}" for k in SCORE_KEYS)
+    sections = _section(f"Top {top_n} by composite score",
+                        f"Composite = {recipe}, each a 0–100 percentile across today's universe. "
+                        "Valuation is relative (cheaper than X% of the universe); the DCF verdict is absolute.",
+                        _top_ideas(ranked, site_url, top_n))
+    if changed["has_history"]:
+        sub = f"Composite change since {changed['prev_date']} (moves of {min_change:g}+ points), with the score that drove it."
+        if changed["up"] or changed["down"]:
+            sections += _section("Moved up", sub, _movers_table(changed["up"], by_ticker, site_url, True), GREEN)
+            sections += _section("Moved down", sub, _movers_table(changed["down"], by_ticker, site_url, False), RED)
         else:
-            other.append(m)
-    return bullish, bearish, other
+            sections += _section("Movers", f"No composite moved {min_change:g}+ points since {changed['prev_date']} — a quiet day.", "")
+        if changed["states"]:
+            sections += _section("State changes", f"Life-cycle phase, model valuation, 200-day trend and top-20 membership vs {changed['prev_date']}.",
+                                 _states(changed["states"], by_ticker, site_url), OLIVE)
+    else:
+        sections += _section("Movers", "No earlier snapshot yet — movers and state changes start with the next run.", "")
+    alerts = _alerts(ranked, site_url)
+    if alerts:
+        sections += _section("Technical alerts", "One-day events (crosses, band touches, volume spikes). Context only — they don't move the scores.", alerts, AMBER)
+
+    up, down, states = len(changed["up"]), len(changed["down"]), len(changed["states"])
+    leaders = ", ".join(r["ticker"] for r in ranked[:3])
+    subject = f"[Stock Screener] {day.strftime('%b %d')} · Top: {leaders}"
+    if changed["has_history"]:
+        subject += f" · {up} up, {down} down, {states} state changes"
+
+    body = f"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{e(subject)}</title></head>
+<body style="margin:0;padding:0;background:{PAPER};font-family:-apple-system,'Segoe UI',Roboto,Arial,sans-serif;color:{INK}">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:{PAPER}"><tr><td align="center" style="padding:20px 10px">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:680px">
+<tr><td style="background:{INK};border-radius:8px 8px 0 0;padding:18px 20px">
+<div style="font-size:11px;letter-spacing:.1em;color:#b8bca8;font-weight:700">STOCK SCREENER / DAILY SCORES</div>
+<div style="font-size:20px;font-weight:800;color:#fff;margin-top:4px">{day.strftime('%A, %B %d, %Y')}</div>
+<div style="margin-top:10px">
+<span style="display:inline-block;padding:2px 10px;border-radius:10px;background:#fff;color:{regime_color};font-size:11px;font-weight:800">Market: {regime.title()}</span>
+<span style="font-size:12px;color:#b8bca8;margin-left:8px">{len(ranked)} scored · {e(universe_label)} · 10-yr Treasury {risk_free * 100:.2f}%</span></div>
+</td></tr>
+<tr><td style="padding:16px 0 0">{sections}</td></tr>
+<tr><td style="text-align:center;padding:4px 0 20px">
+<a href="{e(site_url)}/screener.html" style="display:inline-block;background:{OLIVE};color:#fff;font-weight:700;font-size:13px;padding:10px 18px;border-radius:6px;text-decoration:none">Open the full screener</a>
+<p style="font-size:11px;color:{MUTED};line-height:1.5;margin:14px 10px 0">Click any ticker for its stock card. Scores are model output from Yahoo Finance data
+(free, delayed){f"; {error_count} ticker{'s' if error_count != 1 else ''} skipped for missing data" if error_count else ""}. Not investment advice.</p></td></tr>
+</table></td></tr></table></body></html>"""
+    return body, subject
 
 
-def _score_badge(score: int) -> str:
-    # Darker/bolder badge the higher the score — the highest-scoring rows are the ones to action.
-    intensity = min(score, 4)
-    shades = {
-        1: ("#3730a3", "#e0e7ff"),
-        2: ("#3730a3", "#c7d2fe"),
-        3: ("#312e81", "#a5b4fc"),
-        4: ("#1e1b4b", "#818cf8"),
-    }
-    fg, bg = shades.get(intensity, shades[4])
-    return (
-        f"<span style='display:inline-block;min-width:22px;text-align:center;padding:4px 10px;"
-        f"border-radius:14px;font-size:14px;font-weight:700;color:#fff;background:{fg}'>{score}</span>"
-    )
-
-
-def _table_rows(matches: list[dict]) -> str:
-    rows = ""
-    for i, m in enumerate(matches):
-        row_bg = "#ffffff" if i % 2 == 0 else "#fafafa"
-        badges = "".join(_signal_badge(s) for s in m["signals"])
-        rsi_display = f"{m['rsi']:.1f}" if m["rsi"] is not None else "-"
-        ticker_link = f"https://finance.yahoo.com/quote/{m['ticker']}"
-        rows += (
-            f"<tr style='background:{row_bg}'>"
-            f"<td style='padding:10px 12px;border-bottom:1px solid #eee'>"
-            f"<a href='{ticker_link}' style='color:#111;font-weight:700;text-decoration:none;font-size:14px'>{m['ticker']}</a>"
-            f"<div style='font-size:12px;color:#666;margin-top:2px'>{m['name']}</div>"
-            f"<span style='display:inline-block;margin-top:3px;padding:1px 7px;border-radius:8px;"
-            f"font-size:10px;font-weight:600;color:#555;background:#f0f0f0'>{m['sector']}</span>"
-            "</td>"
-            f"<td style='padding:10px 12px;border-bottom:1px solid #eee;color:#333'>${m['price']:.2f}</td>"
-            f"<td style='padding:10px 12px;border-bottom:1px solid #eee;color:#333'>{rsi_display}</td>"
-            f"<td style='padding:10px 12px;border-bottom:1px solid #eee'>{badges}</td>"
-            f"<td style='padding:10px 12px;border-bottom:1px solid #eee;text-align:center'>{_score_badge(m['score'])}</td>"
-            "</tr>"
-        )
-    return rows
-
-
-def _section(title: str, accent: str, matches: list[dict]) -> str:
-    if not matches:
-        return ""
-    return f"""
-        <div style="background:#fff;border-radius:8px;overflow:hidden;margin-bottom:16px;border-left:4px solid {accent}">
-          <div style="padding:12px 16px;background:#fafafa;border-bottom:1px solid #eee">
-            <span style="font-size:13px;font-weight:700;text-transform:uppercase;letter-spacing:0.03em;color:#333">{title}</span>
-            <span style="font-size:12px;color:#999;margin-left:8px">({len(matches)})</span>
-          </div>
-          <table style="border-collapse:collapse;width:100%">
-            <tr style="background:#f9fafb;text-align:left">
-              <th style="padding:8px 12px;font-size:11px;text-transform:uppercase;letter-spacing:0.03em;color:#6b7280">Ticker</th>
-              <th style="padding:8px 12px;font-size:11px;text-transform:uppercase;letter-spacing:0.03em;color:#6b7280">Price</th>
-              <th style="padding:8px 12px;font-size:11px;text-transform:uppercase;letter-spacing:0.03em;color:#6b7280">RSI</th>
-              <th style="padding:8px 12px;font-size:11px;text-transform:uppercase;letter-spacing:0.03em;color:#6b7280">Signals</th>
-              <th style="padding:8px 12px;font-size:11px;text-transform:uppercase;letter-spacing:0.03em;color:#6b7280;text-align:center">Score</th>
-            </tr>
-            {_table_rows(matches)}
-          </table>
-        </div>
-    """
-
-
-def _quality_value_rows(matches: list[dict]) -> str:
-    rows = ""
-    for i, m in enumerate(matches):
-        row_bg = "#ffffff" if i % 2 == 0 else "#fafafa"
-        badges = "".join(_signal_badge(s) for s in m["signals"]) or "<span style='color:#999;font-size:12px'>none</span>"
-        ticker_link = f"https://finance.yahoo.com/quote/{m['ticker']}"
-        rows += (
-            f"<tr style='background:{row_bg}'>"
-            f"<td style='padding:10px 12px;border-bottom:1px solid #eee'>"
-            f"<a href='{ticker_link}' style='color:#111;font-weight:700;text-decoration:none;font-size:14px'>{m['ticker']}</a>"
-            f"<div style='font-size:12px;color:#666;margin-top:2px'>{m['name']}</div>"
-            f"<span style='display:inline-block;margin-top:3px;padding:1px 7px;border-radius:8px;"
-            f"font-size:10px;font-weight:600;color:#555;background:#f0f0f0'>{m['sector']}</span>"
-            "</td>"
-            f"<td style='padding:10px 12px;border-bottom:1px solid #eee;color:#333'>${m['price']:.2f}</td>"
-            f"<td style='padding:10px 12px;border-bottom:1px solid #eee;color:#1a7f37'>+{m['revenue_growth'] * 100:.1f}%</td>"
-            f"<td style='padding:10px 12px;border-bottom:1px solid #eee;color:#1a7f37'>+{m['eps_growth'] * 100:.1f}%</td>"
-            f"<td style='padding:10px 12px;border-bottom:1px solid #eee;color:#b42318'>-{m['pct_below_high'] * 100:.1f}%</td>"
-            f"<td style='padding:10px 12px;border-bottom:1px solid #eee'>{badges}</td>"
-            f"<td style='padding:10px 12px;border-bottom:1px solid #eee;text-align:center'>{_score_badge(m['score']) if m['score'] else '-'}</td>"
-            "</tr>"
-        )
-    return rows
-
-
-def _quality_value_section(matches: list[dict]) -> str:
-    if not matches:
-        return ""
-    return f"""
-        <div style="background:#fff;border-radius:8px;overflow:hidden;margin-bottom:16px;border-left:4px solid #b45309">
-          <div style="padding:12px 16px;background:#fafafa;border-bottom:1px solid #eee">
-            <span style="font-size:13px;font-weight:700;text-transform:uppercase;letter-spacing:0.03em;color:#333">Quality at a Discount</span>
-            <span style="font-size:12px;color:#999;margin-left:8px">({len(matches)})</span>
-          </div>
-          <table style="border-collapse:collapse;width:100%">
-            <tr style="background:#f9fafb;text-align:left">
-              <th style="padding:8px 12px;font-size:11px;text-transform:uppercase;letter-spacing:0.03em;color:#6b7280">Ticker</th>
-              <th style="padding:8px 12px;font-size:11px;text-transform:uppercase;letter-spacing:0.03em;color:#6b7280">Price</th>
-              <th style="padding:8px 12px;font-size:11px;text-transform:uppercase;letter-spacing:0.03em;color:#6b7280">Rev Growth (YoY)</th>
-              <th style="padding:8px 12px;font-size:11px;text-transform:uppercase;letter-spacing:0.03em;color:#6b7280">EPS Growth (YoY)</th>
-              <th style="padding:8px 12px;font-size:11px;text-transform:uppercase;letter-spacing:0.03em;color:#6b7280">Below 52w High</th>
-              <th style="padding:8px 12px;font-size:11px;text-transform:uppercase;letter-spacing:0.03em;color:#6b7280">Technical Signals</th>
-              <th style="padding:8px 12px;font-size:11px;text-transform:uppercase;letter-spacing:0.03em;color:#6b7280;text-align:center">Score</th>
-            </tr>
-            {_quality_value_rows(matches)}
-          </table>
-        </div>
-    """
-
-
-def _source_badge(source: str) -> str:
-    label, fg, bg = SOURCE_LABELS[source]
-    return (
-        f"<span style='display:inline-block;padding:3px 9px;border-radius:12px;font-size:11px;"
-        f"font-weight:700;color:{fg};background:{bg};white-space:nowrap'>{label}</span>"
-    )
-
-
-def _top_ideas_rows(top_ideas: list[dict]) -> str:
-    rows = ""
-    for i, m in enumerate(top_ideas):
-        row_bg = "#ffffff" if i % 2 == 0 else "#fafafa"
-        badges = "".join(_signal_badge(s) for s in m["signals"]) or "<span style='color:#999;font-size:12px'>none</span>"
-        ticker_link = f"https://finance.yahoo.com/quote/{m['ticker']}"
-        rows += (
-            f"<tr style='background:{row_bg}'>"
-            f"<td style='padding:10px 12px;border-bottom:1px solid #eee;font-weight:700;color:#111;font-size:15px'>{i + 1}</td>"
-            f"<td style='padding:10px 12px;border-bottom:1px solid #eee'>"
-            f"<a href='{ticker_link}' style='color:#111;font-weight:700;text-decoration:none;font-size:14px'>{m['ticker']}</a>"
-            f"<div style='font-size:12px;color:#666;margin-top:2px'>{m['name']}</div>"
-            f"<span style='display:inline-block;margin-top:3px;padding:1px 7px;border-radius:8px;"
-            f"font-size:10px;font-weight:600;color:#555;background:#f0f0f0'>{m['sector']}</span>"
-            "</td>"
-            f"<td style='padding:10px 12px;border-bottom:1px solid #eee;color:#333'>${m['price']:.2f}</td>"
-            f"<td style='padding:10px 12px;border-bottom:1px solid #eee'>{_source_badge(m['source'])}</td>"
-            f"<td style='padding:10px 12px;border-bottom:1px solid #eee'>{badges}</td>"
-            f"<td style='padding:10px 12px;border-bottom:1px solid #eee;text-align:center;font-weight:700;color:#111'>{m['composite_score']:.1f}</td>"
-            "</tr>"
-            f"<tr style='background:{row_bg}'>"
-            f"<td></td>"
-            f"<td colspan='5' style='padding:0 12px 12px 12px;border-bottom:1px solid #eee;color:#555;"
-            f"font-size:12px;line-height:1.5'>{m['rationale']}</td>"
-            "</tr>"
-        )
-    return rows
-
-
-def _top_ideas_section(top_ideas: list[dict], regime: str | None) -> str:
-    if not top_ideas:
-        return ""
-    regime_label = "Uptrend" if regime == "uptrend" else "Downtrend"
-    regime_color = "#1a7f37" if regime == "uptrend" else "#b42318"
-    return f"""
-        <div style="background:#fff;border-radius:8px;overflow:hidden;margin-bottom:20px;border:2px solid #111827">
-          <div style="padding:14px 16px;background:#111827;display:flex;justify-content:space-between;align-items:center">
-            <span style="font-size:14px;font-weight:700;text-transform:uppercase;letter-spacing:0.03em;color:#fff">Today's Top Ideas</span>
-            <span style="font-size:11px;font-weight:700;color:{regime_color};background:#fff;padding:3px 10px;border-radius:12px">Market: {regime_label}</span>
-          </div>
-          <table style="border-collapse:collapse;width:100%">
-            <tr style="background:#f9fafb;text-align:left">
-              <th style="padding:8px 12px;font-size:11px;text-transform:uppercase;letter-spacing:0.03em;color:#6b7280">#</th>
-              <th style="padding:8px 12px;font-size:11px;text-transform:uppercase;letter-spacing:0.03em;color:#6b7280">Ticker</th>
-              <th style="padding:8px 12px;font-size:11px;text-transform:uppercase;letter-spacing:0.03em;color:#6b7280">Price</th>
-              <th style="padding:8px 12px;font-size:11px;text-transform:uppercase;letter-spacing:0.03em;color:#6b7280">Source</th>
-              <th style="padding:8px 12px;font-size:11px;text-transform:uppercase;letter-spacing:0.03em;color:#6b7280">Signals</th>
-              <th style="padding:8px 12px;font-size:11px;text-transform:uppercase;letter-spacing:0.03em;color:#6b7280;text-align:center">Score</th>
-            </tr>
-            {_top_ideas_rows(top_ideas)}
-          </table>
-        </div>
-    """
-
-
-def build_html(
-    matches: list[dict],
-    run_date: date,
-    universe_size: int | None = None,
-    fetched_count: int | None = None,
-    quality_value_matches: list[dict] | None = None,
-    top_ideas: list[dict] | None = None,
-    regime: str | None = None,
-) -> str:
-    quality_value_matches = quality_value_matches or []
-    top_ideas = top_ideas or []
-    bullish, bearish, other = _bucket_matches(matches)
-
-    stats_bits = [f"{len(matches)} matched"]
-    if quality_value_matches:
-        stats_bits.append(f"{len(quality_value_matches)} quality-at-discount")
-    if regime is not None:
-        stats_bits.append(f"market: {regime}")
-    if fetched_count is not None:
-        stats_bits.insert(0, f"{fetched_count} screened")
-    if universe_size is not None:
-        stats_bits.insert(0, f"{universe_size} in universe")
-    stats_line = " · ".join(stats_bits)
-
-    sections = (
-        _top_ideas_section(top_ideas, regime)
-        + _quality_value_section(quality_value_matches)
-        + _section("Oversold / Bullish Signals", "#1a7f37", bullish)
-        + _section("Overbought / Bearish Signals", "#b42318", bearish)
-        + _section("Other Signals (Volume Only / Mixed)", "#6b7280", other)
-    )
-
-    return f"""
-    <html><body style="margin:0;padding:0;background:#f5f5f7;font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;color:#1a1a1a">
-      <div style="max-width:720px;margin:0 auto;padding:24px 16px">
-        <div style="background:#111827;border-radius:10px 10px 0 0;padding:20px 24px">
-          <h1 style="margin:0;color:#fff;font-size:20px;font-weight:700">Stock Screener</h1>
-          <p style="margin:6px 0 0;color:#9ca3af;font-size:13px">{run_date.strftime('%A, %B %d, %Y')}</p>
-        </div>
-
-        <div style="background:#fff;padding:16px 24px;border-bottom:1px solid #eee;font-size:13px;color:#666;margin-bottom:20px">
-          {stats_line} — each section sorted by score (highest = most signals matched)
-        </div>
-
-        {sections}
-
-        <p style="text-align:center;color:#aaa;font-size:11px;margin-top:8px">
-          Generated automatically · S&amp;P 500 + NASDAQ-100 + Russell 2000, $10B+ market cap · free/delayed data via Yahoo Finance
-        </p>
-      </div>
-    </body></html>
-    """
-
-
-def send_digest(
-    matches: list[dict],
-    run_date: date,
-    universe_size: int | None = None,
-    fetched_count: int | None = None,
-    quality_value_matches: list[dict] | None = None,
-    top_ideas: list[dict] | None = None,
-    regime: str | None = None,
-) -> None:
-    quality_value_matches = quality_value_matches or []
-    top_ideas = top_ideas or []
-    if not matches and not quality_value_matches:
-        print("No matches today — no email sent.")
-        return
-
+def send(html_path: str) -> None:
+    body = open(html_path, encoding="utf-8").read()
+    subject = html.unescape(re.search(r"<title>(.*?)</title>", body, re.S).group(1))
     smtp_user = os.environ["EMAIL_SMTP_USER"]
     smtp_password = os.environ["EMAIL_SMTP_PASSWORD"]
     recipients = [r.strip() for r in os.environ["RECIPIENTS"].split(",") if r.strip()]
 
-    subject_headline = f"Top {len(top_ideas)} ideas" if top_ideas else f"{len(matches)} matches"
     msg = MIMEMultipart("alternative")
-    msg["Subject"] = f"[Stock Screener] {subject_headline} — {run_date.isoformat()}"
+    msg["Subject"] = subject
     msg["From"] = smtp_user
     msg["To"] = ", ".join(recipients)
-    msg.attach(
-        MIMEText(
-            build_html(matches, run_date, universe_size, fetched_count, quality_value_matches, top_ideas, regime),
-            "html",
-        )
-    )
-
+    msg.attach(MIMEText(body, "html"))
     with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
         server.starttls()
         server.login(smtp_user, smtp_password)
         server.sendmail(smtp_user, recipients, msg.as_string())
+    print(f"Sent '{subject}' to {len(recipients)} recipient(s)")
 
-    print(
-        f"Sent digest with {len(top_ideas)} top ideas, {len(matches)} technical + "
-        f"{len(quality_value_matches)} quality-at-discount matches to {recipients}"
-    )
+
+if __name__ == "__main__":
+    send(sys.argv[1])

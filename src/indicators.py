@@ -87,33 +87,12 @@ def volume_spike_signal(volume: pd.Series, cfg: dict) -> dict:
     return {"spike": ratio >= cfg["spike_multiple"], "ratio": ratio}
 
 
-def pct_below_52w_high(close: pd.Series, window: int = 252) -> float | None:
-    """Returns how far below its trailing-year high today's close is (0.20 = 20% below)."""
-    if close.empty:
-        return None
-    window_close = close.iloc[-window:] if len(close) >= window else close
-    high = window_close.max()
-    if high <= 0:
-        return None
-    return (high - close.iloc[-1]) / high
-
-
 def below_long_ma(close: pd.Series, window: int) -> bool | None:
     """Returns whether today's close is below the trailing `window`-day moving average."""
     if len(close) < window:
         return None
     ma = close.rolling(window).mean().iloc[-1]
     return bool(close.iloc[-1] < ma)
-
-
-def trailing_return(close: pd.Series, window_days: int) -> float | None:
-    """Returns the % price change over the trailing `window_days`, or None without enough history."""
-    if len(close) <= window_days:
-        return None
-    past = close.iloc[-window_days - 1]
-    if past == 0:
-        return None
-    return (close.iloc[-1] - past) / past
 
 
 def bollinger_signal(close: pd.Series, cfg: dict) -> dict:

@@ -26,24 +26,42 @@ bollinger:
   window: 20
   num_std: 2
 
-# "Quality at a discount" hard filter — fundamentally-improving companies whose price is
-# depressed by market/sector weakness rather than a company-specific problem.
-quality_value:
-  min_revenue_growth: 0.05 # YoY revenue growth must exceed this (5%)
-  min_eps_growth: 0.0 # YoY EPS growth must be positive
-  require_margin_improved: true # gross (or operating, if gross isn't tagged) margin must have improved YoY
-  min_pct_below_52w_high: 0.15 # price must be at least this far below its 52-week high (15%) ...
-  # ... unless it's below its long MA instead (uses ma_cross.slow above) — either counts as "priced low"
-  trailing_return_window_days: 126 # ~6 months, used for the sector-attribution comparison
-  max_sector_relative_underperformance: 0.05 # decline can't exceed the sector's median decline by more than this (5 percentage points)
+# The rsi / ma_cross / volume / bollinger blocks above drive the one-day alert tags shown next to
+# each stock (golden cross, volume spike, ...). They annotate; they don't feed the scores below.
 
-# Combines both screens into a single ranked daily shortlist — regime-aware (down-weights
-# signals fighting the broad market trend) and confluence-aware (rewards tickers both screens
-# agree on). See PLAN.md-equivalent design discussion for rationale.
-ranking:
-  top_n: 6
-  regime_ma_window: 200 # SPY vs. this MA determines uptrend/downtrend
-  regime_misaligned_weight: 0.5 # weight applied to a signal that points against the current regime (full weight is 1.0)
-  fundamental_weight: 5.0 # scales revenue_growth + eps_growth (typically 0.05-0.3) into technical-score-like units
-  discount_weight: 2.0 # scales pct_below_high (typically 0.15-0.5) into technical-score-like units
-  confluence_bonus: 2.0 # bonus for tickers matched by BOTH the technical and quality-value screens
+# Technical score: continuous factors (see src/technical.py), each ranked 0-100 across the
+# universe, then weighted. Higher = more constructive.
+technical_score:
+  weights:
+    trend: 0.35 # price vs 50/200-day averages + 50-day slope
+    momentum: 0.30 # 12-1 month return
+    relative_strength: 0.15 # 6-month return minus the sector median
+    rsi: 0.10 # 100 - RSI percentile vs its own year (pullbacks score higher)
+    volume: 0.10 # up-day / down-day volume (accumulation)
+  momentum_lookback_days: 252
+  momentum_skip_days: 21 # skip the latest month — short-term returns tend to reverse
+  relative_strength_days: 126
+  ma_slope_days: 20
+  volume_window_days: 50
+  smoothing_days: 5 # the score is the average of the last 5 daily scores, so one session can't swing it
+
+# Composite = weighted percentile ranks. Quality and Valuation come from the life-cycle
+# valuation analysis (src/valuation.py); Technical from the block above.
+composite:
+  quality: 0.40
+  valuation: 0.30
+  technical: 0.30
+
+# What the email reports as having changed since the previous run.
+changes:
+  min_change: 5 # composite points; smaller day-to-day moves are noise
+  top_n: 8 # movers shown per direction
+  top_list_size: 20 # entering/leaving the top 20 by composite is a state change
+
+email:
+  top_ideas: 10
+  regime_ma_window: 200 # SPY vs this average sets the market regime shown in the header
+
+fundamentals_refresh:
+  max_age_days: 7 # every ticker's statements are refreshed at least weekly ...
+  buckets: 5 # ... about 1/5 of the universe per weekday, to stay under Yahoo's rate limits

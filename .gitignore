@@ -5,3 +5,7 @@ venv/
 .env
 *.log
 .pytest_cache/
+.cache/
+lifecycle_report/
+site/
+email.html
