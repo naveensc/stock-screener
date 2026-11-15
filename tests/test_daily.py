@@ -126,6 +126,73 @@ def test_first_run_has_no_movers():
     assert not out["has_history"] and out["up"] == [] and out["states"] == []
 
 
+# ---- fetching under rate limits ----
+
+import data  # noqa: E402
+import lifecycle  # noqa: E402
+
+
+@pytest.fixture
+def no_sleep(monkeypatch):
+    slept = []
+    monkeypatch.setattr(lifecycle.time, "sleep", slept.append)
+    monkeypatch.setattr(lifecycle, "_fetch_pacer", lifecycle._AdaptivePacer(0.0, 1.0))
+    return slept
+
+
+def test_retries_wait_long_enough_to_outlast_a_throttle(monkeypatch, no_sleep):
+    calls = []
+
+    def flaky(ticker):
+        calls.append(ticker)
+        if len(calls) < 3:
+            raise lifecycle.IncompleteStatements("empty income statement from Yahoo")
+        return {"ticker": ticker}
+
+    monkeypatch.setattr(lifecycle, "fetch_raw", flaky)
+    assert lifecycle.fetch_with_retries("AAA") == {"ticker": "AAA"}
+    assert len(calls) == 3
+    assert [round(s) >= d for s, d in zip(no_sleep, lifecycle.RETRY_DELAYS_SECONDS)] == [True, True]
+
+
+def test_failed_refresh_falls_back_to_the_cached_copy(monkeypatch, tmp_path, no_sleep):
+    cached = {"ticker": "AAA", "version": lifecycle.CACHE_VERSION, "fetched_at": "2026-11-01T00:00:00"}
+    (tmp_path / "AAA.json").write_text(__import__("json").dumps(cached))
+
+    def always_throttled(ticker):
+        raise lifecycle.IncompleteStatements("empty income statement, cash flow, balance sheet from Yahoo")
+
+    monkeypatch.setattr(lifecycle, "fetch_raw", always_throttled)
+    raw = lifecycle.load_raw("AAA", tmp_path, refresh=False, max_age_hours=0)  # forces a refresh attempt
+    assert raw["stale"] and raw["fetched_at"] == "2026-11-01T00:00:00"
+    assert "stale" not in __import__("json").loads((tmp_path / "AAA.json").read_text())  # cache untouched
+    with pytest.raises(lifecycle.InsufficientData):  # no cached copy -> the ticker is skipped
+        lifecycle.load_raw("BBB", tmp_path, refresh=False)
+
+
+def test_pacer_slows_down_and_recovers():
+    pacer = lifecycle._AdaptivePacer(0.5, 4.0)
+    for _ in range(5):
+        pacer.slow_down()
+    assert pacer._min_interval == 4.0  # capped at the ceiling
+    for _ in range(100):
+        pacer.recover()
+    assert pacer._min_interval == 0.5  # back to the base pace, not below
+
+
+def test_price_download_retries_tickers_that_came_back_empty(monkeypatch):
+    monkeypatch.setattr(data.time, "sleep", lambda s: None)
+    passes = []
+
+    def fake_chunks(tickers, period):
+        passes.append(list(tickers))
+        return {t: "df" for t in tickers if len(passes) > 1 or t != "MSFT"}  # MSFT empty on the first pass
+
+    monkeypatch.setattr(data, "_fetch_chunks", fake_chunks)
+    assert data.fetch_history(["AAPL", "MSFT"]) == {"AAPL": "df", "MSFT": "df"}
+    assert passes == [["AAPL", "MSFT"], ["MSFT"]]
+
+
 # ---- email ----
 
 
@@ -157,5 +224,6 @@ def test_email_first_run_explains_missing_movers():
     html, _ = email_digest.build_html(
         [_email_result("AAA", 1, 80)], {"has_history": False, "prev_date": None, "up": [], "down": [], "states": []},
         run_date="2026-11-13", regime="downtrend", universe_label="test", error_count=3, risk_free=0.05,
-        site_url="https://x", top_n=10, weights=WEIGHTS, min_change=5)
+        site_url="https://x", top_n=10, weights=WEIGHTS, min_change=5, stale_count=2)
     assert "No earlier snapshot yet" in html and "3 tickers skipped" in html
+    assert "2 on older fundamentals because today's refresh failed" in html

@@ -110,7 +110,7 @@ def main() -> None:
     parser.add_argument("--email-out", default="email.html")
     parser.add_argument("--backfill", type=int, default=0, help="also score the previous N trading days (bootstrap)")
     parser.add_argument("--refresh", action="store_true", help="refetch every ticker's fundamentals")
-    parser.add_argument("--workers", type=int, default=lifecycle.DEFAULT_WORKERS)
+    parser.add_argument("--workers", type=int, default=4, help="concurrent fundamentals fetches (paced globally)")
     args = parser.parse_args()
 
     with open("config/rules.yaml") as f:
@@ -129,9 +129,14 @@ def main() -> None:
     logger.info("Scoring %d tickers", len(tickers))
 
     price_data = fetch_history([*tickers, "SPY"], period="2y")
-    logger.info("Fetched price history for %d/%d tickers", len(price_data) - ("SPY" in price_data), len(tickers))
+    if "SPY" not in price_data:  # it sets the run date and the market regime
+        raise SystemExit("Couldn't fetch SPY price history from Yahoo (rate limited?) — aborting the run.")
+    logger.info("Fetched price history for %d/%d tickers", len(price_data) - 1, len(tickers))
     risk_free = valuation.fetch_risk_free()
     raws, errors = _load_raws(tickers, args.refresh, args.workers, rules["fundamentals_refresh"])
+    stale_count = sum(1 for raw in raws.values() if raw.get("stale"))
+    if stale_count:
+        logger.warning("%d ticker(s) are using older cached fundamentals (refresh failed)", stale_count)
 
     history_path = Path(args.history)
     history = scores.load_history(history_path)
@@ -163,7 +168,8 @@ def main() -> None:
         logger.warning("SITE_URL not set — email links point at %s (local preview)", site_url)
     html, subject = email_digest.build_html(
         results, changed, run_date=run_date, regime=regime, universe_label=universe_label,
-        error_count=len(errors), risk_free=risk_free, site_url=site_url, top_n=rules["email"]["top_ideas"],
+        error_count=len(errors), stale_count=stale_count, risk_free=risk_free, site_url=site_url,
+        top_n=rules["email"]["top_ideas"],
         weights=rules["composite"], min_change=rules["changes"]["min_change"],
     )
     Path(args.email_out).write_text(html, encoding="utf-8")

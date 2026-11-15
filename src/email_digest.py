@@ -158,7 +158,7 @@ def _alerts(results: list[dict], site_url: str) -> str:
 
 def build_html(results: list[dict], changed: dict, *, run_date: str, regime: str, universe_label: str,
                error_count: int, risk_free: float, site_url: str, top_n: int, weights: dict[str, float],
-               min_change: float) -> tuple[str, str]:
+               min_change: float, stale_count: int = 0) -> tuple[str, str]:
     """Returns (html, subject). `results` must be sorted by composite rank."""
     by_ticker = {r["ticker"]: r for r in results}
     ranked = [r for r in results if r["daily"]["rank"] is not None]
@@ -208,7 +208,7 @@ def build_html(results: list[dict], changed: dict, *, run_date: str, regime: str
 <tr><td style="text-align:center;padding:4px 0 20px">
 <a href="{e(site_url)}/screener.html" style="display:inline-block;background:{OLIVE};color:#fff;font-weight:700;font-size:13px;padding:10px 18px;border-radius:6px;text-decoration:none">Open the full screener</a>
 <p style="font-size:11px;color:{MUTED};line-height:1.5;margin:14px 10px 0">Click any ticker for its stock card. Scores are model output from Yahoo Finance data
-(free, delayed){f"; {error_count} ticker{'s' if error_count != 1 else ''} skipped for missing data" if error_count else ""}. Not investment advice.</p></td></tr>
+(free, delayed){f"; {error_count} ticker{'s' if error_count != 1 else ''} skipped for missing data" if error_count else ""}{f"; {stale_count} on older fundamentals because today's refresh failed" if stale_count else ""}. Not investment advice.</p></td></tr>
 </table></td></tr></table></body></html>"""
     return body, subject
 

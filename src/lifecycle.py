@@ -86,22 +86,42 @@ HYBRID_LIGHT_SHARE = (0.2, 0.8)  # share of signals pointing asset-light strictl
 # for display and valuation; the profit metric above still follows the simple majority.
 CACHE_TTL_HOURS = 24
 DEFAULT_WORKERS = 8
-MAX_RETRIES = 4
-RETRY_BASE_SECONDS = 2  # backoff: 2s, 4s, 8s (+ jitter)
+# Yahoo's rate-limit blocks last minutes, not seconds, so short retries just burn attempts.
+RETRY_DELAYS_SECONDS = (30, 60, 120)  # waits before the 2nd, 3rd and 4th attempt (+ jitter)
 PROGRESS_LOG_INTERVAL = 50
 CACHE_DIR = Path(__file__).resolve().parent.parent / ".cache" / "lifecycle"
-FETCH_MIN_INTERVAL_SECONDS = 0.4  # global pace between ticker fetches (each is ~7 Yahoo requests)
+FETCH_MIN_INTERVAL_SECONDS = 0.4  # global pace between ticker fetches (each is ~7 Yahoo requests) ...
+FETCH_MAX_INTERVAL_SECONDS = 6.0  # ... stretched up to this while Yahoo is refusing requests
 CACHE_VERSION = 5  # bump when fetch_raw starts storing new statements; older cache files are refetched
 # ---------------------------------------------------------------------------------------------
 
 PHASES = {1: "Startup", 2: "Hyper Growth", 3: "Operating Leverage", 4: "Capital Return", 5: "Decline"}
 KEY_TRANSITIONS = {(2, 3): "Just turned profitable", (3, 4): "Started returning capital"}
 
+
 class InsufficientData(Exception):
     """Ticker lacks the statements needed to classify it — skipped, not retried."""
 
 
-_fetch_pacer = _RateLimiter(FETCH_MIN_INTERVAL_SECONDS)  # shared by all fetch threads
+class _AdaptivePacer(_RateLimiter):
+    """The global fetch pace, shared by every thread: doubles whenever Yahoo pushes back and
+    eases back toward the base pace as requests succeed, so the whole pool slows down together
+    instead of each thread hammering on independently."""
+
+    def __init__(self, base: float, ceiling: float):
+        super().__init__(base)
+        self._base, self._ceiling = base, ceiling
+
+    def slow_down(self) -> None:
+        with self._lock:
+            self._min_interval = min(self._min_interval * 2, self._ceiling)
+
+    def recover(self) -> None:
+        with self._lock:
+            self._min_interval = max(self._min_interval * 0.9, self._base)
+
+
+_fetch_pacer = _AdaptivePacer(FETCH_MIN_INTERVAL_SECONDS, FETCH_MAX_INTERVAL_SECONDS)
 
 
 # ---- Phase logic ----------------------------------------------------------------------------
@@ -370,27 +390,46 @@ def fetch_raw(ticker: str) -> dict:
 
 
 def fetch_with_retries(ticker: str) -> dict:
-    for attempt in range(1, MAX_RETRIES + 1):
+    attempts = len(RETRY_DELAYS_SECONDS) + 1
+    for attempt in range(1, attempts + 1):
         try:
-            return fetch_raw(ticker)
+            raw = fetch_raw(ticker)
+            _fetch_pacer.recover()
+            return raw
         except Exception as exc:  # yfinance/requests raise a variety of errors, incl. rate limits
-            if attempt == MAX_RETRIES:
+            _fetch_pacer.slow_down()
+            if attempt == attempts:
                 if isinstance(exc, IncompleteStatements):
-                    raise InsufficientData(f"{exc} after {MAX_RETRIES} tries (not covered, or rate-limited)") from exc
+                    raise InsufficientData(f"{exc} after {attempts} tries (not covered, or rate-limited)") from exc
                 raise
-            delay = RETRY_BASE_SECONDS * 2 ** (attempt - 1) + random.uniform(0, 1)
-            logger.warning("%s fetch failed (attempt %d/%d): %s — retrying in %.1fs", ticker, attempt, MAX_RETRIES, exc, delay)
+            delay = RETRY_DELAYS_SECONDS[attempt - 1] + random.uniform(0, 5)
+            logger.warning("%s fetch failed (attempt %d/%d): %s — retrying in %.0fs", ticker, attempt, attempts, exc, delay)
             time.sleep(delay)
     raise AssertionError("unreachable")
 
 
+def _read_cache(path: Path) -> dict | None:
+    if not path.exists():
+        return None
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    return raw if raw.get("version") == CACHE_VERSION else None
+
+
 def load_raw(ticker: str, cache_dir: Path, refresh: bool, max_age_hours: float = CACHE_TTL_HOURS) -> dict:
+    """Cached statements if fresh enough, else a refetch. If the refetch fails (Yahoo throttling
+    outlasting the retries), an older cached copy is used rather than dropping the ticker; it's
+    marked "stale" so the run can report how many tickers are on older fundamentals."""
     path = cache_dir / f"{ticker}.json"
-    if not refresh and path.exists() and time.time() - path.stat().st_mtime < max_age_hours * 3600:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-        if raw.get("version") == CACHE_VERSION:
-            return raw
-    raw = fetch_with_retries(ticker)
+    cached = _read_cache(path)
+    if cached is not None and not refresh and time.time() - path.stat().st_mtime < max_age_hours * 3600:
+        return cached
+    try:
+        raw = fetch_with_retries(ticker)
+    except Exception as exc:
+        if cached is None:
+            raise
+        logger.warning("%s: refresh failed (%s) — using fundamentals cached %s", ticker, exc, cached.get("fetched_at", "earlier"))
+        return {**cached, "stale": True}
     path.write_text(json.dumps(raw), encoding="utf-8")
     return raw
 
